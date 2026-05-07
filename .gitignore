@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PyInstaller
+*.spec.bak
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Config (contains user API keys)
+config.json
+
+# Build artifacts
+*.exe

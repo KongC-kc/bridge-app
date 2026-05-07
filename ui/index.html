@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>GLM Bridge</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f7fb;
+    color: #1f2937;
+    -webkit-font-smoothing: antialiased;
+  }
+  .toolbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; background: #fff;
+    border-bottom: 1px solid #e5e7eb;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 999px;
+    background: #ecfdf5; color: #059669; font-size: 13px; font-weight: 500;
+    border: 1px solid #a7f3d0;
+  }
+  .status-pill.stopped { background: #fef2f2; color: #dc2626; border-color: #fecaca; }
+  .status-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .url-box {
+    flex: 1; display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; background: #f3f4f6; border-radius: 8px;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 13px; color: #374151;
+    border: 1px solid #e5e7eb;
+  }
+  .url-box .label { color: #9ca3af; font-family: -apple-system, sans-serif; flex-shrink: 0; }
+  .url-box .value { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 14px; border-radius: 8px; border: 1px solid #e5e7eb;
+    background: #fff; color: #374151; font-size: 13px; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover { background: #f9fafb; border-color: #d1d5db; }
+  .btn.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .btn.primary:hover { background: #1d4ed8; }
+  .btn.danger { color: #dc2626; }
+  .btn.danger:hover { background: #fef2f2; border-color: #fca5a5; }
+  .btn.icon { padding: 8px; }
+  .btn.sm { padding: 5px 10px; font-size: 12px; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  main { padding: 20px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: #fff; border-radius: 12px;
+    border: 1px solid #e5e7eb; padding: 18px;
+    transition: all 0.15s; position: relative;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.04); }
+  .card.active { border-color: #10b981; box-shadow: 0 0 0 2px rgba(16,185,129,0.1); }
+  .card-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .card-name {
+    font-size: 15px; font-weight: 600; color: #111827;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .badge {
+    display: inline-flex; align-items: center; padding: 3px 9px;
+    border-radius: 999px; font-size: 11px; font-weight: 500;
+    background: #f3f4f6; color: #6b7280;
+  }
+  .badge.active { background: #d1fae5; color: #065f46; }
+  .badge.disabled { background: #fee2e2; color: #991b1b; }
+  .badge.provider { background: #eff6ff; color: #1d4ed8; }
+  .field { font-size: 12px; color: #6b7280; display: flex; gap: 8px; align-items: center; }
+  .field .k { width: 64px; flex-shrink: 0; color: #9ca3af; }
+  .field .v {
+    flex: 1; font-family: ui-monospace, Consolas, monospace; color: #374151;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .card-actions {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    margin-top: auto; padding-top: 8px; border-top: 1px solid #f3f4f6;
+  }
+
+  /* modal */
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: none; align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-mask.show { display: flex; }
+  .modal {
+    background: #fff; border-radius: 12px; padding: 24px;
+    width: 480px; max-width: 90vw; max-height: 90vh; overflow: auto;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.2);
+  }
+  .modal h2 { font-size: 18px; margin-bottom: 18px; }
+  .form-row { margin-bottom: 14px; }
+  .form-row label {
+    display: block; font-size: 13px; color: #374151;
+    margin-bottom: 6px; font-weight: 500;
+  }
+  .form-row input, .form-row select {
+    width: 100%; padding: 8px 12px; border: 1px solid #d1d5db;
+    border-radius: 8px; font-size: 14px; font-family: inherit;
+    background: #fff; color: #111827;
+  }
+  .form-row input:focus, .form-row select:focus {
+    outline: none; border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.15);
+  }
+  .form-row .hint { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+  .modal-footer {
+    display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;
+  }
+
+  .empty {
+    grid-column: 1 / -1;
+    text-align: center; padding: 80px 20px;
+    color: #9ca3af; font-size: 14px;
+  }
+  .empty h3 { font-size: 16px; color: #6b7280; margin-bottom: 8px; }
+
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #111827; color: #fff; padding: 10px 18px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none;
+    z-index: 200;
+  }
+  .toast.show { opacity: 1; }
+
+  .switch {
+    position: relative; width: 36px; height: 20px;
+    background: #d1d5db; border-radius: 999px; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .switch.on { background: #10b981; }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; background: #fff; border-radius: 50%;
+    transition: left 0.15s;
+  }
+  .switch.on::after { left: 18px; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <div id="status-pill" class="status-pill">
+    <span class="dot"></span>
+    <span id="status-text">运行中</span>
+  </div>
+  <div class="url-box">
+    <span class="label">监听</span>
+    <span class="value" id="bridge-url">—</span>
+    <button class="btn sm" onclick="copyUrl()">复制</button>
+  </div>
+  <div class="url-box" style="flex: 0 0 auto;">
+    <span class="label">Key</span>
+    <span class="value" id="bridge-key" style="max-width: 180px;">—</span>
+    <button class="btn sm" onclick="copyKey()">复制</button>
+  </div>
+  <button class="btn" onclick="toggleBridge()" id="toggle-btn">停止</button>
+  <button class="btn" onclick="openSettings()">设置</button>
+  <button class="btn primary" onclick="openAddModal()">+ 添加账号</button>
+</div>
+
+<main>
+  <div class="grid" id="grid"></div>
+</main>
+
+<!-- Add/Edit modal -->
+<div class="modal-mask" id="account-modal">
+  <div class="modal">
+    <h2 id="modal-title">添加账号</h2>
+    <div class="form-row">
+      <label>名称</label>
+      <input type="text" id="f-name" placeholder="例如：GLM 主账号" />
+    </div>
+    <div class="form-row">
+      <label>Provider</label>
+      <select id="f-provider"></select>
+      <div class="hint">选择会自动填充 base url 和默认模型，可手动修改</div>
+    </div>
+    <div class="form-row">
+      <label>API Key</label>
+      <input type="text" id="f-api-key" placeholder="原厂的 API Key" />
+    </div>
+    <div class="form-row">
+      <label>API Base</label>
+      <input type="text" id="f-api-base" />
+    </div>
+    <div class="form-row">
+      <label>默认模型</label>
+      <input type="text" id="f-model" placeholder="如 glm-5.1 / deepseek-chat" />
+      <div class="hint">客户端调用时实际转发到上游使用的模型名</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeAccountModal()">取消</button>
+      <button class="btn danger" id="modal-delete-btn" style="display:none" onclick="deleteCurrent()">删除</button>
+      <button class="btn primary" onclick="saveAccount()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings modal -->
+<div class="modal-mask" id="settings-modal">
+  <div class="modal">
+    <h2>设置</h2>
+    <div class="form-row">
+      <label>监听端口</label>
+      <input type="number" id="s-port" min="1024" max="65535" />
+      <div class="hint">改完会自动重启 bridge</div>
+    </div>
+    <div class="form-row">
+      <label>Proxy API Key（客户端调用 bridge 用的）</label>
+      <input type="text" id="s-key" />
+    </div>
+    <div class="form-row" style="display:flex;align-items:center;gap:12px;">
+      <label style="margin:0;flex:1;">强制使用账号默认模型</label>
+      <div class="switch" id="s-force-model" onclick="toggleForceModel()"></div>
+    </div>
+    <div class="hint" style="margin-bottom:14px;">开启后，无论客户端发什么 model，都会用当前账号的"默认模型"调用上游。Codex 必开</div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeSettings()">取消</button>
+      <button class="btn primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let providers = [];
+let editingAccountId = null;
+let settingsCache = null;
+
+function $(id) { return document.getElementById(id); }
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+async function api(name, ...args) {
+  return await window.pywebview.api[name](...args);
+}
+
+async function refresh() {
+  const [accounts, status, providersList] = await Promise.all([
+    api("list_accounts"), api("get_status"), api("list_providers"),
+  ]);
+  providers = providersList;
+  renderStatus(status);
+  renderAccounts(accounts, status.running ? status : null);
+}
+
+function renderStatus(s) {
+  const pill = $("status-pill");
+  const text = $("status-text");
+  if (s.running) {
+    pill.classList.remove("stopped");
+    text.textContent = `运行中 :${s.port}`;
+    $("toggle-btn").textContent = "停止";
+  } else {
+    pill.classList.add("stopped");
+    text.textContent = "已停止";
+    $("toggle-btn").textContent = "启动";
+  }
+  $("bridge-url").textContent = s.url;
+  $("bridge-key").textContent = s.proxy_api_key;
+}
+
+function renderAccounts(accounts, status) {
+  const grid = $("grid");
+  if (!accounts.length) {
+    grid.innerHTML = `<div class="empty"><h3>还没有账号</h3>点右上角「+ 添加账号」开始</div>`;
+    return;
+  }
+  const cfg = settingsCache || {};
+  grid.innerHTML = accounts.map(acc => {
+    const isActive = cfg.active_account_id === acc.id;
+    const provName = (providers.find(p => p.key === acc.provider) || {}).name || acc.provider;
+    return `
+      <div class="card ${isActive ? "active" : ""}">
+        <div class="card-header">
+          <div class="card-name">${escapeHtml(acc.name)}</div>
+          <div style="display:flex;gap:6px;">
+            ${isActive
+              ? '<span class="badge active">当前</span>'
+              : (acc.enabled ? '<span class="badge">备用</span>' : '<span class="badge disabled">已停用</span>')}
+            <span class="badge provider">${escapeHtml(provName)}</span>
+          </div>
+        </div>
+        <div class="field"><span class="k">API Key</span><span class="v">${maskKey(acc.api_key)}</span></div>
+        <div class="field"><span class="k">Base</span><span class="v">${escapeHtml(acc.api_base || "—")}</span></div>
+        <div class="field"><span class="k">Model</span><span class="v">${escapeHtml(acc.default_model || "—")}</span></div>
+        <div class="card-actions">
+          ${isActive
+            ? '<button class="btn sm" disabled>当前使用中</button>'
+            : `<button class="btn sm primary" onclick="setActive('${acc.id}')">设为当前</button>`}
+          <button class="btn sm" onclick="editAccount('${acc.id}')">编辑</button>
+          <button class="btn sm" onclick="toggleEnabled('${acc.id}', ${!acc.enabled})">${acc.enabled ? "停用" : "启用"}</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function maskKey(k) {
+  if (!k) return "—";
+  if (k.length <= 12) return "•".repeat(k.length);
+  return k.slice(0, 6) + "•".repeat(8) + k.slice(-4);
+}
+
+async function setActive(id) {
+  await api("set_active", id);
+  await loadSettings();
+  await refresh();
+  toast("已切换当前账号");
+}
+
+async function toggleEnabled(id, enabled) {
+  await api("update_account", id, { enabled });
+  await refresh();
+}
+
+function openAddModal() {
+  editingAccountId = null;
+  $("modal-title").textContent = "添加账号";
+  $("modal-delete-btn").style.display = "none";
+  $("f-name").value = "";
+  $("f-api-key").value = "";
+  populateProviders();
+  applyProviderPreset(providers[0]?.key || "custom");
+  $("account-modal").classList.add("show");
+}
+
+function populateProviders() {
+  $("f-provider").innerHTML = providers.map(p =>
+    `<option value="${p.key}">${escapeHtml(p.name)}</option>`).join("");
+  $("f-provider").onchange = (e) => applyProviderPreset(e.target.value);
+}
+
+function applyProviderPreset(key) {
+  const p = providers.find(x => x.key === key);
+  if (!p) return;
+  $("f-provider").value = key;
+  if (!$("f-api-base").value || $("f-api-base").dataset.preset !== "0") {
+    $("f-api-base").value = p.api_base;
+    $("f-api-base").dataset.preset = "1";
+  }
+  if (!$("f-model").value || $("f-model").dataset.preset !== "0") {
+    $("f-model").value = p.default_model;
+    $("f-model").dataset.preset = "1";
+  }
+}
+
+["f-api-base", "f-model"].forEach(id => {
+  document.addEventListener("DOMContentLoaded", () => {
+    $(id).addEventListener("input", () => $(id).dataset.preset = "0");
+  });
+});
+
+async function editAccount(id) {
+  const accounts = await api("list_accounts");
+  const acc = accounts.find(a => a.id === id);
+  if (!acc) return;
+  editingAccountId = id;
+  $("modal-title").textContent = "编辑账号";
+  $("modal-delete-btn").style.display = "inline-flex";
+  populateProviders();
+  $("f-name").value = acc.name;
+  $("f-provider").value = acc.provider;
+  $("f-api-key").value = acc.api_key;
+  $("f-api-base").value = acc.api_base;
+  $("f-api-base").dataset.preset = "0";
+  $("f-model").value = acc.default_model;
+  $("f-model").dataset.preset = "0";
+  $("account-modal").classList.add("show");
+}
+
+function closeAccountModal() {
+  $("account-modal").classList.remove("show");
+}
+
+async function saveAccount() {
+  const data = {
+    name: $("f-name").value.trim(),
+    provider: $("f-provider").value,
+    api_key: $("f-api-key").value.trim(),
+    api_base: $("f-api-base").value.trim(),
+    default_model: $("f-model").value.trim(),
+  };
+  if (!data.name) return toast("请填写名称");
+  if (!data.api_key) return toast("请填写 API Key");
+  if (!data.api_base) return toast("请填写 API Base");
+  if (editingAccountId) {
+    await api("update_account", editingAccountId, data);
+    toast("已保存");
+  } else {
+    await api("add_account", data);
+    toast("已添加");
+  }
+  closeAccountModal();
+  await loadSettings();
+  await refresh();
+}
+
+async function deleteCurrent() {
+  if (!editingAccountId) return;
+  if (!confirm("确认删除该账号？")) return;
+  await api("delete_account", editingAccountId);
+  closeAccountModal();
+  await loadSettings();
+  await refresh();
+  toast("已删除");
+}
+
+async function openSettings() {
+  await loadSettings();
+  $("s-port").value = settingsCache.port;
+  $("s-key").value = settingsCache.proxy_api_key;
+  $("s-force-model").classList.toggle("on", !!settingsCache.force_model);
+  $("settings-modal").classList.add("show");
+}
+function closeSettings() { $("settings-modal").classList.remove("show"); }
+function toggleForceModel() {
+  $("s-force-model").classList.toggle("on");
+}
+async function saveSettings() {
+  const data = {
+    port: parseInt($("s-port").value) || 4000,
+    proxy_api_key: $("s-key").value.trim(),
+    force_model: $("s-force-model").classList.contains("on"),
+  };
+  await api("update_settings", data);
+  closeSettings();
+  await loadSettings();
+  await refresh();
+  toast("已保存");
+}
+
+async function loadSettings() {
+  settingsCache = await api("get_settings");
+}
+
+async function toggleBridge() {
+  const s = await api("get_status");
+  if (s.running) {
+    await api("stop_bridge");
+    toast("已停止");
+  } else {
+    await api("start_bridge");
+    toast("已启动");
+  }
+  await refresh();
+}
+
+function copyUrl() {
+  navigator.clipboard.writeText($("bridge-url").textContent);
+  toast("已复制 URL");
+}
+function copyKey() {
+  navigator.clipboard.writeText($("bridge-key").textContent);
+  toast("已复制 Key");
+}
+
+(async () => {
+  await loadSettings();
+  await refresh();
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>
