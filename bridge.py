@@ -39,6 +39,9 @@ def _resolve_model(acc: dict, requested_model: str | None) -> str:
     cfg = config_store.load()
     if cfg.get("force_model", True) and acc.get("default_model"):
         return acc["default_model"]
+    models = acc.get("models") or []
+    if requested_model and models and requested_model in models:
+        return requested_model
     return requested_model or acc.get("default_model") or ""
 
 
@@ -442,8 +445,19 @@ async def list_models(authorization: str = Header(None)):
     _check_auth(authorization)
     cfg = config_store.load()
     data = []
+    seen = set()
     for acc in cfg.get("accounts", []):
-        if acc.get("enabled", True) and acc.get("default_model"):
+        if not acc.get("enabled", True):
+            continue
+        models = acc.get("models") or []
+        if models:
+            for m in models:
+                if m and m not in seen:
+                    seen.add(m)
+                    data.append({"id": m, "object": "model",
+                                 "owned_by": acc.get("provider", "custom")})
+        elif acc.get("default_model") and acc["default_model"] not in seen:
+            seen.add(acc["default_model"])
             data.append({"id": acc["default_model"], "object": "model",
                          "owned_by": acc.get("provider", "custom")})
     return {"object": "list", "data": data}

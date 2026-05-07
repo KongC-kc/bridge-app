@@ -9,6 +9,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('ui', 'ui'),
+        ('assets', 'assets'),
     ],
     hiddenimports=[
         'uvicorn.loops.asyncio',
@@ -52,5 +53,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon='assets/icon.ico',
 )

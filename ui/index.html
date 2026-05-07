@@ -148,6 +148,30 @@
     transition: left 0.15s;
   }
   .switch.on::after { left: 18px; }
+
+  .model-fetch-row {
+    display: flex; gap: 8px; align-items: center;
+  }
+  .model-fetch-row input { flex: 1; }
+  .model-list {
+    max-height: 200px; overflow-y: auto;
+    border: 1px solid #e5e7eb; border-radius: 8px;
+    padding: 8px; margin-top: 8px;
+    display: none;
+  }
+  .model-list.show { display: block; }
+  .model-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 6px; border-radius: 4px; cursor: pointer;
+    font-size: 13px; font-family: ui-monospace, Consolas, monospace;
+  }
+  .model-item:hover { background: #f3f4f6; }
+  .model-item input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; }
+  .model-count {
+    display: inline-flex; align-items: center; padding: 2px 7px;
+    border-radius: 999px; font-size: 10px; font-weight: 600;
+    background: #eff6ff; color: #2563eb; margin-left: 6px;
+  }
 </style>
 </head>
 <body>
@@ -198,9 +222,13 @@
       <input type="text" id="f-api-base" />
     </div>
     <div class="form-row">
-      <label>默认模型</label>
-      <input type="text" id="f-model" placeholder="如 glm-5.1 / deepseek-chat" />
-      <div class="hint">客户端调用时实际转发到上游使用的模型名</div>
+      <label>模型</label>
+      <div class="model-fetch-row">
+        <input type="text" id="f-model" placeholder="如 glm-5.1 / deepseek-chat" />
+        <button class="btn sm" id="fetch-models-btn" onclick="fetchModels()">获取模型</button>
+      </div>
+      <div class="hint">默认模型用于 force_model 模式。点击「获取模型」从上游拉取可用模型列表</div>
+      <div class="model-list" id="model-list"></div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeAccountModal()">取消</button>
@@ -262,6 +290,9 @@
 let providers = [];
 let editingAccountId = null;
 let settingsCache = null;
+let fetchedModels = [];       // models from upstream
+let selectedModels = [];      // user-selected models
+let editingModels = [];       // models saved in account being edited
 
 function $(id) { return document.getElementById(id); }
 
@@ -324,7 +355,7 @@ function renderAccounts(accounts, status) {
         </div>
         <div class="field"><span class="k">API Key</span><span class="v">${maskKey(acc.api_key)}</span></div>
         <div class="field"><span class="k">Base</span><span class="v">${escapeHtml(acc.api_base || "—")}</span></div>
-        <div class="field"><span class="k">Model</span><span class="v">${escapeHtml(acc.default_model || "—")}</span></div>
+        <div class="field"><span class="k">Model</span><span class="v">${escapeHtml(acc.default_model || "—")}${(acc.models && acc.models.length > 1) ? `<span class="model-count">+${acc.models.length - 1}</span>` : ""}</span></div>
         <div class="card-actions">
           ${isActive
             ? '<button class="btn sm" disabled>当前使用中</button>'
@@ -361,10 +392,15 @@ async function toggleEnabled(id, enabled) {
 
 function openAddModal() {
   editingAccountId = null;
+  fetchedModels = [];
+  selectedModels = [];
+  editingModels = [];
   $("modal-title").textContent = "添加账号";
   $("modal-delete-btn").style.display = "none";
   $("f-name").value = "";
   $("f-api-key").value = "";
+  $("model-list").classList.remove("show");
+  $("model-list").innerHTML = "";
   populateProviders();
   applyProviderPreset(providers[0]?.key || "custom");
   $("account-modal").classList.add("show");
@@ -401,8 +437,13 @@ async function editAccount(id) {
   const acc = accounts.find(a => a.id === id);
   if (!acc) return;
   editingAccountId = id;
+  fetchedModels = [];
+  editingModels = acc.models || [];
+  selectedModels = [...editingModels];
   $("modal-title").textContent = "编辑账号";
   $("modal-delete-btn").style.display = "inline-flex";
+  $("model-list").classList.remove("show");
+  $("model-list").innerHTML = "";
   populateProviders();
   $("f-name").value = acc.name;
   $("f-provider").value = acc.provider;
@@ -419,12 +460,15 @@ function closeAccountModal() {
 }
 
 async function saveAccount() {
+  const defaultModel = $("f-model").value.trim();
+  const models = selectedModels.length > 0 ? selectedModels : (defaultModel ? [defaultModel] : []);
   const data = {
     name: $("f-name").value.trim(),
     provider: $("f-provider").value,
     api_key: $("f-api-key").value.trim(),
     api_base: $("f-api-base").value.trim(),
-    default_model: $("f-model").value.trim(),
+    default_model: defaultModel,
+    models: models,
   };
   if (!data.name) return toast("请填写名称");
   if (!data.api_key) return toast("请填写 API Key");
@@ -439,6 +483,53 @@ async function saveAccount() {
   closeAccountModal();
   await loadSettings();
   await refresh();
+}
+
+async function fetchModels() {
+  const base = $("f-api-base").value.trim();
+  const key = $("f-api-key").value.trim();
+  if (!base || !key) return toast("请先填写 API Base 和 API Key");
+  const btn = $("fetch-models-btn");
+  btn.disabled = true;
+  btn.textContent = "获取中...";
+  try {
+    const result = await api("fetch_models", base, key);
+    if (result.error) {
+      toast(result.error);
+      return;
+    }
+    fetchedModels = result.models || [];
+    if (!fetchedModels.length) {
+      toast("未获取到模型");
+      return;
+    }
+    renderModelList();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "获取模型";
+  }
+}
+
+function renderModelList() {
+  const list = $("model-list");
+  list.innerHTML = fetchedModels.map(m => {
+    const checked = selectedModels.includes(m) ? "checked" : "";
+    return `<label class="model-item"><input type="checkbox" ${checked} onchange="toggleModel('${escapeHtml(m)}', this.checked)" />${escapeHtml(m)}</label>`;
+  }).join("");
+  list.classList.add("show");
+}
+
+function toggleModel(model, checked) {
+  if (checked) {
+    if (!selectedModels.includes(model)) selectedModels.push(model);
+  } else {
+    selectedModels = selectedModels.filter(m => m !== model);
+  }
+  // first selected → default model
+  if (selectedModels.length > 0) {
+    $("f-model").value = selectedModels[0];
+    $("f-model").dataset.preset = "0";
+  }
 }
 
 async function deleteCurrent() {
@@ -506,11 +597,13 @@ function copyKey() {
   toast("已复制 Key");
 }
 
-(async () => {
+async function init() {
   await loadSettings();
   await refresh();
   setInterval(refresh, 5000);
-})();
+}
+
+window.addEventListener('pywebviewready', init);
 </script>
 </body>
 </html>

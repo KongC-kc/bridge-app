@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
+
 import uvicorn
 import webview
 
@@ -297,6 +299,20 @@ class API:
 
     def list_providers(self):
         return providers.list_providers()
+
+    def fetch_models(self, api_base, api_key):
+        try:
+            url = f"{api_base.rstrip('/')}/models"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            r = httpx.get(url, headers=headers, timeout=15.0)
+            if r.status_code != 200:
+                return {"error": f"请求失败 ({r.status_code})"}
+            data = r.json()
+            model_ids = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+            model_ids.sort()
+            return {"models": model_ids}
+        except Exception as e:
+            return {"error": str(e)}
 
     # bridge control
     def get_status(self):

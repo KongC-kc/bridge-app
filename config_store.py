@@ -83,6 +83,7 @@ def add_account(data: dict) -> dict:
         "api_key": data.get("api_key") or "",
         "api_base": data.get("api_base") or "",
         "default_model": data.get("default_model") or "",
+        "models": data.get("models") or [],
         "enabled": data.get("enabled", True),
     }
     cfg["accounts"].append(acc)
@@ -96,7 +97,7 @@ def update_account(account_id: str, data: dict) -> dict | None:
     cfg = load()
     for acc in cfg["accounts"]:
         if acc["id"] == account_id:
-            for k in ("name", "provider", "api_key", "api_base", "default_model", "enabled"):
+            for k in ("name", "provider", "api_key", "api_base", "default_model", "models", "enabled"):
                 if k in data:
                     acc[k] = data[k]
             save(cfg)
