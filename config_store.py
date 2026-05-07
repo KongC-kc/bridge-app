@@ -1,12 +1,16 @@
-"""配置存储：JSON 文件位于 %APPDATA%/GLMBridge/config.json"""
+"""配置存储：JSON 文件位于 %APPDATA%/AIBridge/config.json"""
 import json
 import os
 import secrets
+import shutil
 import threading
 import uuid
 from pathlib import Path
 
 _lock = threading.Lock()
+
+_OLD_DIR_NAME = "GLMBridge"
+_NEW_DIR_NAME = "AIBridge"
 
 
 def _config_dir() -> Path:
@@ -14,9 +18,13 @@ def _config_dir() -> Path:
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     else:
         base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    p = Path(base) / "GLMBridge"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    new_dir = Path(base) / _NEW_DIR_NAME
+    old_dir = Path(base) / _OLD_DIR_NAME
+    # 迁移旧配置
+    if old_dir.exists() and not new_dir.exists():
+        shutil.move(str(old_dir), str(new_dir))
+    new_dir.mkdir(parents=True, exist_ok=True)
+    return new_dir
 
 
 CONFIG_PATH = _config_dir() / "config.json"
@@ -28,6 +36,9 @@ def _default_config() -> dict:
         "proxy_api_key": "sk-" + secrets.token_hex(24),
         "active_account_id": None,
         "force_model": True,  # 客户端传任何 model 都用 active 账号的 default_model
+        "auto_start": False,       # 开机自启
+        "silent_start": False,     # 静默启动（不显示窗口）
+        "minimize_to_tray": False, # 关闭窗口后最小化到托盘
         "accounts": [],
     }
 
@@ -115,7 +126,8 @@ def set_active(account_id: str) -> bool:
 
 def update_settings(data: dict) -> dict:
     cfg = load()
-    for k in ("port", "proxy_api_key", "force_model"):
+    for k in ("port", "proxy_api_key", "force_model",
+              "auto_start", "silent_start", "minimize_to_tray"):
         if k in data:
             cfg[k] = data[k]
     save(cfg)

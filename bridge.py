@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import config_store
 
-app = FastAPI(title="GLM Bridge")
+app = FastAPI(title="AI Bridge")
 client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
 
 

@@ -12,7 +12,7 @@ if %errorlevel%==0 (
 )
 
 echo ========================================
-echo  GLM Bridge - Dev Mode
+echo  AI Bridge - Dev Mode
 echo ========================================
 echo.
 echo Python:

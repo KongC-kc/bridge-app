@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for GLM Bridge
+# PyInstaller spec for AI Bridge
 
 block_cipher = None
 
@@ -39,7 +39,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='GLMBridge',
+    name='AIBridge',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

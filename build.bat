@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal
 
 echo ========================================
-echo  GLM Bridge - Windows Build Script
+echo  AI Bridge - Windows Build Script
 echo ========================================
 echo.
 
@@ -29,7 +29,7 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 echo [3/3] 打包 exe (PyInstaller)...
-%PY% -m PyInstaller GLMBridge.spec --clean --noconfirm
+%PY% -m PyInstaller AIBridge.spec --clean --noconfirm
 if errorlevel 1 (
     echo [错误] 打包失败
     pause
@@ -39,11 +39,11 @@ if errorlevel 1 (
 echo.
 echo ========================================
 echo  打包完成！
-echo  exe 路径: dist\GLMBridge.exe
+echo  exe 路径: dist\AIBridge.exe
 echo ========================================
 echo.
 
-if exist dist\GLMBridge.exe (
+if exist dist\AIBridge.exe (
     explorer dist
 )
 pause

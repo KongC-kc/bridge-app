@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<title>GLM Bridge</title>
+<title>AI Bridge</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -225,9 +225,30 @@
     </div>
     <div class="form-row" style="display:flex;align-items:center;gap:12px;">
       <label style="margin:0;flex:1;">强制使用账号默认模型</label>
-      <div class="switch" id="s-force-model" onclick="toggleForceModel()"></div>
+      <div class="switch" id="s-force-model" onclick="toggleSwitch('s-force-model')"></div>
     </div>
     <div class="hint" style="margin-bottom:14px;">开启后，无论客户端发什么 model，都会用当前账号的"默认模型"调用上游。Codex 必开</div>
+
+    <div style="margin:18px 0 12px;font-size:15px;font-weight:600;color:#374151;border-top:1px solid #e5e7eb;padding-top:18px;">启动与行为</div>
+
+    <div class="form-row" style="display:flex;align-items:center;gap:12px;">
+      <label style="margin:0;flex:1;">开机自启动</label>
+      <div class="switch" id="s-auto-start" onclick="toggleSwitch('s-auto-start')"></div>
+    </div>
+    <div class="hint" style="margin-bottom:14px;">开机后自动在后台启动 AI Bridge</div>
+
+    <div class="form-row" style="display:flex;align-items:center;gap:12px;">
+      <label style="margin:0;flex:1;">静默启动</label>
+      <div class="switch" id="s-silent-start" onclick="toggleSwitch('s-silent-start')"></div>
+    </div>
+    <div class="hint" style="margin-bottom:14px;">启动时不显示主窗口，静默在后台运行。建议同时开启「关闭最小化到托盘」</div>
+
+    <div class="form-row" style="display:flex;align-items:center;gap:12px;">
+      <label style="margin:0;flex:1;">关闭窗口后最小化到托盘</label>
+      <div class="switch" id="s-minimize-to-tray" onclick="toggleSwitch('s-minimize-to-tray')"></div>
+    </div>
+    <div class="hint" style="margin-bottom:14px;">关闭主窗口后程序不会退出，而是在系统托盘继续运行。需重启应用生效</div>
+
     <div class="modal-footer">
       <button class="btn" onclick="closeSettings()">取消</button>
       <button class="btn primary" onclick="saveSettings()">保存</button>
@@ -435,17 +456,23 @@ async function openSettings() {
   $("s-port").value = settingsCache.port;
   $("s-key").value = settingsCache.proxy_api_key;
   $("s-force-model").classList.toggle("on", !!settingsCache.force_model);
+  $("s-auto-start").classList.toggle("on", !!settingsCache.auto_start);
+  $("s-silent-start").classList.toggle("on", !!settingsCache.silent_start);
+  $("s-minimize-to-tray").classList.toggle("on", !!settingsCache.minimize_to_tray);
   $("settings-modal").classList.add("show");
 }
 function closeSettings() { $("settings-modal").classList.remove("show"); }
-function toggleForceModel() {
-  $("s-force-model").classList.toggle("on");
+function toggleSwitch(id) {
+  $(id).classList.toggle("on");
 }
 async function saveSettings() {
   const data = {
     port: parseInt($("s-port").value) || 4000,
     proxy_api_key: $("s-key").value.trim(),
     force_model: $("s-force-model").classList.contains("on"),
+    auto_start: $("s-auto-start").classList.contains("on"),
+    silent_start: $("s-silent-start").classList.contains("on"),
+    minimize_to_tray: $("s-minimize-to-tray").classList.contains("on"),
   };
   await api("update_settings", data);
   closeSettings();
