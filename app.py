@@ -92,14 +92,14 @@ class TrayIcon:
             except Exception:
                 pass
 
-    def _show_window(self):
+    def _show_window(self, icon, item):
         try:
             self.window.restore()
             self.window.show()
         except Exception:
             pass
 
-    def _quit(self):
+    def _quit(self, icon, item):
         global _quitting
         _quitting = True
         SERVER.stop()
@@ -291,8 +291,9 @@ def main():
 
         def on_closing():
             if _quitting:
-                return
+                return True
             window.hide()
+            return False
 
         window.events.closing += on_closing
 
