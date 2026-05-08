@@ -1,5 +1,6 @@
 """HTTP 服务：动态根据 config 中的 active account 路由请求。"""
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator
@@ -10,8 +11,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import config_store
 
+logger = logging.getLogger("bridge")
+
 app = FastAPI(title="AI Bridge")
-client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+
+# Per-request client factory — avoids connection-pool contention across streams
+def _make_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
 
 
 def _check_auth(authorization: str | None):
@@ -124,7 +130,10 @@ def responses_to_chat(body: dict, model: str) -> dict:
             if tool.get("type") != "function":
                 continue
             if "function" in tool:
-                chat_tools.append(tool)
+                # Deep-copy to avoid mutating the original, strip Responses-only fields
+                fn = dict(tool["function"])
+                fn.pop("strict", None)
+                chat_tools.append({"type": "function", "function": fn})
             else:
                 chat_tools.append({
                     "type": "function",
@@ -137,10 +146,25 @@ def responses_to_chat(body: dict, model: str) -> dict:
         if chat_tools:
             chat["tools"] = chat_tools
 
-    for k in ("temperature", "top_p", "tool_choice", "parallel_tool_calls",
+    for k in ("temperature", "top_p", "tool_choice",
               "user", "stop", "presence_penalty", "frequency_penalty"):
         if k in body:
-            chat[k] = body[k]
+            val = body[k]
+            # Convert Responses API tool_choice format to Chat Completions format
+            if k == "tool_choice" and isinstance(val, dict):
+                tc_type = val.get("type")
+                if tc_type == "function":
+                    # Responses: {"type":"function","name":"xxx"}
+                    # Chat:      {"type":"function","function":{"name":"xxx"}}
+                    fn_name = val.get("name", "")
+                    val = {"type": "function", "function": {"name": fn_name}}
+                elif tc_type in ("auto", "required", "none"):
+                    val = tc_type
+            chat[k] = val
+
+    # Only forward parallel_tool_calls if explicitly True (some providers reject it)
+    if body.get("parallel_tool_calls") is True:
+        chat["parallel_tool_calls"] = True
     if "max_output_tokens" in body:
         chat["max_tokens"] = body["max_output_tokens"]
     elif "max_tokens" in body:
@@ -200,6 +224,25 @@ def chat_to_responses(chat_resp: dict, model: str) -> dict:
     }
 
 
+async def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
+    """Robust SSE line iterator that handles split packets correctly.
+
+    Instead of aiter_lines() which splits on \\n and can break mid-data,
+    we buffer raw bytes and yield complete lines only.
+    """
+    buf = b""
+    async for raw_chunk in response.aiter_bytes():
+        buf += raw_chunk
+        while b"\n" in buf:
+            line_bytes, buf = buf.split(b"\n", 1)
+            line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
+            if line:
+                yield line
+    # flush trailing data (some providers omit final newline)
+    if buf.strip():
+        yield buf.decode("utf-8", errors="replace").rstrip("\r")
+
+
 async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: str) -> AsyncIterator[bytes]:
     response_id = _new_id("resp")
     created = int(time.time())
@@ -218,129 +261,152 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
     fc_item_ids: dict[int, str] = {}
     fc_output_indices: dict[int, int] = {}
     usage: dict = {}
+    upstream_errored = False
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    cli = _make_client()
 
-    async with client.stream("POST", f"{api_base.rstrip('/')}/chat/completions",
-                             json=chat_body, headers=headers) as r:
-        if r.status_code != 200:
-            err_text = await r.aread()
-            yield _sse("response.failed", {
-                "type": "response.failed",
-                "response": {**base_resp, "status": "failed"},
-                "error": {"message": err_text.decode("utf-8", "ignore")},
-            })
-            return
-
-        async for line in r.aiter_lines():
-            if not line or not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-
-            if chunk.get("usage"):
-                usage = chunk["usage"]
-
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta") or {}
-
-            content = delta.get("content")
-            if content:
-                if text_msg_id is None:
-                    text_msg_id = _new_id("msg")
-                    yield _sse("response.output_item.added", {
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": {"id": text_msg_id, "type": "message",
-                                 "status": "in_progress", "role": "assistant", "content": []},
-                    })
-                if not text_part_added:
-                    text_part_added = True
-                    yield _sse("response.content_part.added", {
-                        "type": "response.content_part.added",
-                        "item_id": text_msg_id, "output_index": output_index,
-                        "content_index": 0,
-                        "part": {"type": "output_text", "text": "", "annotations": []},
-                    })
-                full_text += content
-                yield _sse("response.output_text.delta", {
-                    "type": "response.output_text.delta",
-                    "item_id": text_msg_id, "output_index": output_index,
-                    "content_index": 0, "delta": content,
+    try:
+        async with cli.stream("POST", f"{api_base.rstrip('/')}/chat/completions",
+                              json=chat_body, headers=headers) as r:
+            if r.status_code != 200:
+                err_text = await r.aread()
+                yield _sse("response.failed", {
+                    "type": "response.failed",
+                    "response": {**base_resp, "status": "failed"},
+                    "error": {"message": err_text.decode("utf-8", "ignore")},
                 })
+                return
 
-            for tc_delta in delta.get("tool_calls") or []:
-                idx = tc_delta.get("index", 0)
-                if idx not in tool_calls:
-                    tool_calls[idx] = {"id": tc_delta.get("id") or _new_id("call"),
-                                       "name": "", "args": ""}
-                if tc_delta.get("id"):
-                    tool_calls[idx]["id"] = tc_delta["id"]
-                fn = tc_delta.get("function") or {}
-                if fn.get("name"):
-                    tool_calls[idx]["name"] += fn["name"]
-                args_delta = fn.get("arguments")
+            async for line in _iter_sse_lines(r):
+                if not line.startswith("data:"):
+                    # could be 'event: ...' or comment — skip
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    logger.warning("SSE JSON parse error, skipping: %s", data[:200])
+                    continue
 
-                if not fc_added.get(idx):
-                    if text_msg_id is not None and text_part_added:
-                        yield _sse("response.output_text.done", {
-                            "type": "response.output_text.done",
-                            "item_id": text_msg_id, "output_index": output_index,
-                            "content_index": 0, "text": full_text,
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+
+                content = delta.get("content")
+                if content:
+                    if text_msg_id is None:
+                        text_msg_id = _new_id("msg")
+                        yield _sse("response.output_item.added", {
+                            "type": "response.output_item.added",
+                            "output_index": output_index,
+                            "item": {"id": text_msg_id, "type": "message",
+                                     "status": "in_progress", "role": "assistant", "content": []},
                         })
-                        yield _sse("response.content_part.done", {
-                            "type": "response.content_part.done",
+                    if not text_part_added:
+                        text_part_added = True
+                        yield _sse("response.content_part.added", {
+                            "type": "response.content_part.added",
                             "item_id": text_msg_id, "output_index": output_index,
                             "content_index": 0,
-                            "part": {"type": "output_text", "text": full_text, "annotations": []},
+                            "part": {"type": "output_text", "text": "", "annotations": []},
                         })
-                        yield _sse("response.output_item.done", {
-                            "type": "response.output_item.done",
+                    full_text += content
+                    yield _sse("response.output_text.delta", {
+                        "type": "response.output_text.delta",
+                        "item_id": text_msg_id, "output_index": output_index,
+                        "content_index": 0, "delta": content,
+                    })
+
+                for tc_delta in delta.get("tool_calls") or []:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_calls:
+                        tool_calls[idx] = {"id": tc_delta.get("id") or _new_id("call"),
+                                           "name": "", "args": ""}
+                    if tc_delta.get("id"):
+                        tool_calls[idx]["id"] = tc_delta["id"]
+                    fn = tc_delta.get("function") or {}
+                    if fn.get("name"):
+                        tool_calls[idx]["name"] += fn["name"]
+                    args_delta = fn.get("arguments")
+
+                    if not fc_added.get(idx):
+                        if text_msg_id is not None and text_part_added:
+                            yield _sse("response.output_text.done", {
+                                "type": "response.output_text.done",
+                                "item_id": text_msg_id, "output_index": output_index,
+                                "content_index": 0, "text": full_text,
+                            })
+                            yield _sse("response.content_part.done", {
+                                "type": "response.content_part.done",
+                                "item_id": text_msg_id, "output_index": output_index,
+                                "content_index": 0,
+                                "part": {"type": "output_text", "text": full_text, "annotations": []},
+                            })
+                            yield _sse("response.output_item.done", {
+                                "type": "response.output_item.done",
+                                "output_index": output_index,
+                                "item": {"id": text_msg_id, "type": "message", "status": "completed",
+                                         "role": "assistant",
+                                         "content": [{"type": "output_text", "text": full_text,
+                                                      "annotations": []}]},
+                            })
+                            final_output.append({
+                                "id": text_msg_id, "type": "message", "status": "completed",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+                            })
+                            text_msg_id = None
+                            text_part_added = False
+                            output_index += 1
+
+                        fc_item_id = _new_id("fc")
+                        fc_item_ids[idx] = fc_item_id
+                        fc_output_indices[idx] = output_index
+                        yield _sse("response.output_item.added", {
+                            "type": "response.output_item.added",
                             "output_index": output_index,
-                            "item": {"id": text_msg_id, "type": "message", "status": "completed",
-                                     "role": "assistant",
-                                     "content": [{"type": "output_text", "text": full_text,
-                                                  "annotations": []}]},
+                            "item": {"id": fc_item_id, "type": "function_call",
+                                     "status": "in_progress",
+                                     "call_id": tool_calls[idx]["id"],
+                                     "name": tool_calls[idx]["name"],
+                                     "arguments": ""},
                         })
-                        final_output.append({
-                            "id": text_msg_id, "type": "message", "status": "completed",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-                        })
-                        text_msg_id = None
-                        text_part_added = False
+                        fc_added[idx] = True
                         output_index += 1
 
-                    fc_item_id = _new_id("fc")
-                    fc_item_ids[idx] = fc_item_id
-                    fc_output_indices[idx] = output_index
-                    yield _sse("response.output_item.added", {
-                        "type": "response.output_item.added",
-                        "output_index": output_index,
-                        "item": {"id": fc_item_id, "type": "function_call",
-                                 "status": "in_progress",
-                                 "call_id": tool_calls[idx]["id"],
-                                 "name": tool_calls[idx]["name"],
-                                 "arguments": ""},
-                    })
-                    fc_added[idx] = True
-                    output_index += 1
+                    if args_delta:
+                        tool_calls[idx]["args"] += args_delta
+                        yield _sse("response.function_call_arguments.delta", {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": fc_item_ids[idx],
+                            "output_index": fc_output_indices[idx],
+                            "delta": args_delta,
+                        })
 
-                if args_delta:
-                    tool_calls[idx]["args"] += args_delta
-                    yield _sse("response.function_call_arguments.delta", {
-                        "type": "response.function_call_arguments.delta",
-                        "item_id": fc_item_ids[idx],
-                        "output_index": fc_output_indices[idx],
-                        "delta": args_delta,
-                    })
+    except (httpx.ReadTimeout, httpx.ReadError, httpx.ConnectError,
+            httpx.PoolTimeout, httpx.RemoteProtocolError,
+            ConnectionResetError, BrokenPipeError, OSError) as exc:
+        logger.error("Upstream stream error: %s", exc)
+        upstream_errored = True
+        # Emit an error message so the client knows something went wrong
+        if text_msg_id is not None and text_part_added:
+            yield _sse("response.output_text.done", {
+                "type": "response.output_text.done",
+                "item_id": text_msg_id, "output_index": output_index,
+                "content_index": 0, "text": full_text,
+            })
+    except Exception as exc:
+        logger.error("Unexpected stream error: %s", exc)
+        upstream_errored = True
+    finally:
+        await cli.aclose()
 
     if text_msg_id is not None:
         if text_part_added:
@@ -358,12 +424,14 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
         yield _sse("response.output_item.done", {
             "type": "response.output_item.done",
             "output_index": output_index,
-            "item": {"id": text_msg_id, "type": "message", "status": "completed",
+            "item": {"id": text_msg_id, "type": "message",
+                     "status": "completed" if not upstream_errored else "incomplete",
                      "role": "assistant",
                      "content": [{"type": "output_text", "text": full_text, "annotations": []}]},
         })
         final_output.append({
-            "id": text_msg_id, "type": "message", "status": "completed",
+            "id": text_msg_id, "type": "message",
+            "status": "completed" if not upstream_errored else "incomplete",
             "role": "assistant",
             "content": [{"type": "output_text", "text": full_text, "annotations": []}],
         })
@@ -385,7 +453,8 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
 
     completed = {
         "id": response_id, "object": "response", "created_at": created,
-        "status": "completed", "model": model, "output": final_output,
+        "status": "completed" if not upstream_errored else "incomplete",
+        "model": model, "output": final_output,
         "output_text": full_text,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
@@ -412,8 +481,9 @@ async def responses_endpoint(request: Request, authorization: str = Header(None)
         )
 
     headers = {"Authorization": f"Bearer {acc['api_key']}", "Content-Type": "application/json"}
-    r = await client.post(f"{acc['api_base'].rstrip('/')}/chat/completions",
-                          json=chat_body, headers=headers)
+    async with _make_client() as cli:
+        r = await cli.post(f"{acc['api_base'].rstrip('/')}/chat/completions",
+                           json=chat_body, headers=headers)
     if r.status_code != 200:
         return JSONResponse(status_code=r.status_code, content=_safe_json(r))
     return chat_to_responses(r.json(), model)
@@ -429,14 +499,36 @@ async def chat_endpoint(request: Request, authorization: str = Header(None)):
 
     if body.get("stream"):
         async def proxy_stream():
-            async with client.stream("POST", f"{acc['api_base'].rstrip('/')}/chat/completions",
-                                     json=body, headers=headers) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+            cli = _make_client()
+            try:
+                async with cli.stream("POST", f"{acc['api_base'].rstrip('/')}/chat/completions",
+                                      json=body, headers=headers) as r:
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+            except (httpx.ReadTimeout, httpx.ReadError, httpx.ConnectError,
+                    httpx.PoolTimeout, httpx.RemoteProtocolError,
+                    ConnectionResetError, BrokenPipeError, OSError) as exc:
+                logger.error("Chat proxy stream error: %s", exc)
+                # Emit SSE error so the client knows the stream died
+                err_data = json.dumps({"error": {"message": f"Stream interrupted: {exc}",
+                                                 "type": "stream_error"}},
+                                      ensure_ascii=False)
+                yield f"data: {err_data}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+            except Exception as exc:
+                logger.error("Unexpected chat proxy error: %s", exc)
+                err_data = json.dumps({"error": {"message": f"Unexpected error: {exc}",
+                                                 "type": "stream_error"}},
+                                      ensure_ascii=False)
+                yield f"data: {err_data}\n\n".encode("utf-8")
+                yield b"data: [DONE]\n\n"
+            finally:
+                await cli.aclose()
         return StreamingResponse(proxy_stream(), media_type="text/event-stream")
 
-    r = await client.post(f"{acc['api_base'].rstrip('/')}/chat/completions",
-                          json=body, headers=headers)
+    async with _make_client() as cli:
+        r = await cli.post(f"{acc['api_base'].rstrip('/')}/chat/completions",
+                           json=body, headers=headers)
     return JSONResponse(status_code=r.status_code, content=_safe_json(r))
 
 
