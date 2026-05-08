@@ -27,6 +27,7 @@ a = Analysis(
         'ai_bridge.bridge',
         'ai_bridge.config',
         'ai_bridge.providers',
+        'ai_bridge.quota',
         'ai_bridge.tray',
         'ai_bridge._resources',
         'ai_bridge.platform',
