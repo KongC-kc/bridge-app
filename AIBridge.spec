@@ -21,6 +21,7 @@ a = Analysis(
         'uvicorn.lifespan.on',
         'uvicorn.lifespan.off',
         'uvicorn.logging',
+        'pystray._win32',
     ],
     hookspath=[],
     hooksconfig={},
