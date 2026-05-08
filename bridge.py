@@ -173,7 +173,29 @@ def responses_to_chat(body: dict, model: str) -> dict:
     return chat
 
 
-def chat_to_responses(chat_resp: dict, model: str) -> dict:
+def _resp_base(req_body: dict | None, model: str) -> dict:
+    """Build the common fields every Responses API response must include.
+
+    Codex / OpenAI tooling checks for these fields to decide if the endpoint
+    is a genuine Responses API.  We echo back whatever the client sent.
+    """
+    b = req_body or {}
+    return {
+        "metadata": b.get("metadata", {}),
+        "temperature": b.get("temperature", 1.0),
+        "top_p": b.get("top_p", 1.0),
+        "instructions": b.get("instructions", ""),
+        "max_output_tokens": b.get("max_output_tokens"),
+        "tools": b.get("tools", []),
+        "tool_choice": b.get("tool_choice", "auto"),
+        "parallel_tool_calls": b.get("parallel_tool_calls", True),
+        "truncated": False,
+        "incomplete_details": None,
+        "model": model,
+    }
+
+
+def chat_to_responses(chat_resp: dict, model: str, req_body: dict | None = None) -> dict:
     choice = chat_resp["choices"][0]
     msg = choice.get("message", {})
     text = msg.get("content") or ""
@@ -208,12 +230,11 @@ def chat_to_responses(chat_resp: dict, model: str) -> dict:
         })
 
     usage = chat_resp.get("usage") or {}
-    return {
+    resp: dict[str, Any] = {
         "id": _new_id("resp"),
         "object": "response",
         "created_at": chat_resp.get("created", int(time.time())),
         "status": "completed",
-        "model": model,
         "output": output,
         "output_text": text,
         "usage": {
@@ -222,6 +243,8 @@ def chat_to_responses(chat_resp: dict, model: str) -> dict:
             "total_tokens": usage.get("total_tokens", 0),
         },
     }
+    resp.update(_resp_base(req_body, model))
+    return resp
 
 
 async def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
@@ -243,7 +266,8 @@ async def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
         yield buf.decode("utf-8", errors="replace").rstrip("\r")
 
 
-async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: str) -> AsyncIterator[bytes]:
+async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: str,
+                           req_body: dict | None = None) -> AsyncIterator[bytes]:
     response_id = _new_id("resp")
     created = int(time.time())
     base_resp = {"id": response_id, "object": "response", "created_at": created,
@@ -454,7 +478,7 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
     completed = {
         "id": response_id, "object": "response", "created_at": created,
         "status": "completed" if not upstream_errored else "incomplete",
-        "model": model, "output": final_output,
+        "output": final_output,
         "output_text": full_text,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
@@ -462,6 +486,7 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
             "total_tokens": usage.get("total_tokens", 0),
         },
     }
+    completed.update(_resp_base(req_body, model))
     yield _sse("response.completed", {"type": "response.completed", "response": completed})
 
 
@@ -476,7 +501,8 @@ async def responses_endpoint(request: Request, authorization: str = Header(None)
 
     if body.get("stream"):
         return StreamingResponse(
-            stream_responses(chat_body, model, acc["api_base"], acc["api_key"]),
+            stream_responses(chat_body, model, acc["api_base"], acc["api_key"],
+                             req_body=body),
             media_type="text/event-stream",
         )
 
@@ -486,7 +512,7 @@ async def responses_endpoint(request: Request, authorization: str = Header(None)
                            json=chat_body, headers=headers)
     if r.status_code != 200:
         return JSONResponse(status_code=r.status_code, content=_safe_json(r))
-    return chat_to_responses(r.json(), model)
+    return chat_to_responses(r.json(), model, req_body=body)
 
 
 @app.post("/v1/chat/completions")
