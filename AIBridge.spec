@@ -4,12 +4,12 @@
 block_cipher = None
 
 a = Analysis(
-    ['app.py'],
-    pathex=[],
+    ['src/ai_bridge/__main__.py'],
+    pathex=['src'],
     binaries=[],
     datas=[
-        ('ui', 'ui'),
-        ('assets', 'assets'),
+        ('src/ai_bridge/ui', 'ui'),
+        ('src/ai_bridge/assets', 'assets'),
     ],
     hiddenimports=[
         'uvicorn.loops.asyncio',
@@ -22,6 +22,15 @@ a = Analysis(
         'uvicorn.lifespan.off',
         'uvicorn.logging',
         'pystray._win32',
+        'ai_bridge',
+        'ai_bridge.app',
+        'ai_bridge.bridge',
+        'ai_bridge.config',
+        'ai_bridge.providers',
+        'ai_bridge.tray',
+        'ai_bridge._resources',
+        'ai_bridge.platform',
+        'ai_bridge.platform.windows',
     ],
     hookspath=[],
     hooksconfig={},
@@ -54,5 +63,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/icon.ico',
+    icon='src/ai_bridge/assets/icon.ico',
 )

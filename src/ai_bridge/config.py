@@ -1,4 +1,4 @@
-"""配置存储：JSON 文件位于 %APPDATA%/AIBridge/config.json"""
+"""配置存储：JSON 文件位于平台配置目录下。"""
 import json
 import os
 import secrets
@@ -20,7 +20,6 @@ def _config_dir() -> Path:
         base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     new_dir = Path(base) / _NEW_DIR_NAME
     old_dir = Path(base) / _OLD_DIR_NAME
-    # 迁移旧配置
     if old_dir.exists() and not new_dir.exists():
         shutil.move(str(old_dir), str(new_dir))
     new_dir.mkdir(parents=True, exist_ok=True)
@@ -35,10 +34,10 @@ def _default_config() -> dict:
         "port": 4000,
         "proxy_api_key": "sk-" + secrets.token_hex(24),
         "active_account_id": None,
-        "force_model": True,  # 客户端传任何 model 都用 active 账号的 default_model
-        "auto_start": False,       # 开机自启
-        "silent_start": False,     # 静默启动（不显示窗口）
-        "minimize_to_tray": False, # 关闭窗口后最小化到托盘
+        "force_model": True,
+        "auto_start": False,
+        "silent_start": False,
+        "minimize_to_tray": False,
         "accounts": [],
     }
 
@@ -53,7 +52,6 @@ def load() -> dict:
             cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             cfg = _default_config()
-        # 补全缺失字段
         defaults = _default_config()
         for k, v in defaults.items():
             cfg.setdefault(k, v)

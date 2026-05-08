@@ -9,19 +9,19 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-import config_store
+from . import config
 
 logger = logging.getLogger("bridge")
 
 app = FastAPI(title="AI Bridge")
 
-# Per-request client factory — avoids connection-pool contention across streams
+
 def _make_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
 
 
 def _check_auth(authorization: str | None):
-    cfg = config_store.load()
+    cfg = config.load()
     expected = cfg.get("proxy_api_key", "")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing Bearer token")
@@ -30,8 +30,8 @@ def _check_auth(authorization: str | None):
 
 
 def _resolve_account() -> dict:
-    cfg = config_store.load()
-    acc = config_store.get_active_account(cfg)
+    cfg = config.load()
+    acc = config.get_active_account(cfg)
     if not acc:
         raise HTTPException(503, "No active account configured")
     if not acc.get("enabled", True):
@@ -42,7 +42,7 @@ def _resolve_account() -> dict:
 
 
 def _resolve_model(acc: dict, requested_model: str | None) -> str:
-    cfg = config_store.load()
+    cfg = config.load()
     if cfg.get("force_model", True) and acc.get("default_model"):
         return acc["default_model"]
     models = acc.get("models") or []
@@ -130,7 +130,6 @@ def responses_to_chat(body: dict, model: str) -> dict:
             if tool.get("type") != "function":
                 continue
             if "function" in tool:
-                # Deep-copy to avoid mutating the original, strip Responses-only fields
                 fn = dict(tool["function"])
                 fn.pop("strict", None)
                 chat_tools.append({"type": "function", "function": fn})
@@ -150,19 +149,15 @@ def responses_to_chat(body: dict, model: str) -> dict:
               "user", "stop", "presence_penalty", "frequency_penalty"):
         if k in body:
             val = body[k]
-            # Convert Responses API tool_choice format to Chat Completions format
             if k == "tool_choice" and isinstance(val, dict):
                 tc_type = val.get("type")
                 if tc_type == "function":
-                    # Responses: {"type":"function","name":"xxx"}
-                    # Chat:      {"type":"function","function":{"name":"xxx"}}
                     fn_name = val.get("name", "")
                     val = {"type": "function", "function": {"name": fn_name}}
                 elif tc_type in ("auto", "required", "none"):
                     val = tc_type
             chat[k] = val
 
-    # Only forward parallel_tool_calls if explicitly True (some providers reject it)
     if body.get("parallel_tool_calls") is True:
         chat["parallel_tool_calls"] = True
     if "max_output_tokens" in body:
@@ -174,11 +169,6 @@ def responses_to_chat(body: dict, model: str) -> dict:
 
 
 def _resp_base(req_body: dict | None, model: str) -> dict:
-    """Build the common fields every Responses API response must include.
-
-    Codex / OpenAI tooling checks for these fields to decide if the endpoint
-    is a genuine Responses API.  We echo back whatever the client sent.
-    """
     b = req_body or {}
     return {
         "metadata": b.get("metadata", {}),
@@ -248,11 +238,6 @@ def chat_to_responses(chat_resp: dict, model: str, req_body: dict | None = None)
 
 
 async def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
-    """Robust SSE line iterator that handles split packets correctly.
-
-    Instead of aiter_lines() which splits on \\n and can break mid-data,
-    we buffer raw bytes and yield complete lines only.
-    """
     buf = b""
     async for raw_chunk in response.aiter_bytes():
         buf += raw_chunk
@@ -261,7 +246,6 @@ async def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
             line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
             if line:
                 yield line
-    # flush trailing data (some providers omit final newline)
     if buf.strip():
         yield buf.decode("utf-8", errors="replace").rstrip("\r")
 
@@ -304,7 +288,6 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
 
             async for line in _iter_sse_lines(r):
                 if not line.startswith("data:"):
-                    # could be 'event: ...' or comment — skip
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
@@ -419,7 +402,6 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
             ConnectionResetError, BrokenPipeError, OSError) as exc:
         logger.error("Upstream stream error: %s", exc)
         upstream_errored = True
-        # Emit an error message so the client knows something went wrong
         if text_msg_id is not None and text_part_added:
             yield _sse("response.output_text.done", {
                 "type": "response.output_text.done",
@@ -535,7 +517,6 @@ async def chat_endpoint(request: Request, authorization: str = Header(None)):
                     httpx.PoolTimeout, httpx.RemoteProtocolError,
                     ConnectionResetError, BrokenPipeError, OSError) as exc:
                 logger.error("Chat proxy stream error: %s", exc)
-                # Emit SSE error so the client knows the stream died
                 err_data = json.dumps({"error": {"message": f"Stream interrupted: {exc}",
                                                  "type": "stream_error"}},
                                       ensure_ascii=False)
@@ -561,7 +542,7 @@ async def chat_endpoint(request: Request, authorization: str = Header(None)):
 @app.get("/v1/models")
 async def list_models(authorization: str = Header(None)):
     _check_auth(authorization)
-    cfg = config_store.load()
+    cfg = config.load()
     data = []
     seen = set()
     for acc in cfg.get("accounts", []):

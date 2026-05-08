@@ -1,113 +1,19 @@
 """主入口：启动 uvicorn 后台线程 + PyWebView 主窗口。"""
-import os
 import sys
 import threading
 import time
-from pathlib import Path
 
 import httpx
-import pystray
-from PIL import Image
-
 import uvicorn
 import webview
 
-import bridge
-import config_store
-import providers
+from . import bridge, config, providers
+from ._resources import resource_path
+from .platform import get_platform
+from .tray import TrayIcon
 
 APP_NAME = "AI Bridge"
 APP_TITLE = f"{APP_NAME} — API 中转管理"
-REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-MUTEX_NAME = "Global\\AIBridge_SingleInstance"
-
-
-def _resource_path(rel: str) -> str:
-    """PyInstaller bundle 兼容的资源路径。"""
-    base = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
-    return os.path.join(base, rel)
-
-
-def _load_icon_image():
-    """加载托盘图标。"""
-    icon_path = _resource_path("assets/icon.ico")
-    if os.path.exists(icon_path):
-        return Image.open(icon_path)
-    # fallback: 简单色块
-    return Image.new("RGBA", (64, 64), (99, 102, 241))
-
-
-# --------- single instance (Windows mutex) ---------
-def _check_single_instance() -> bool:
-    """返回 True 表示我们是第一个实例。"""
-    if os.name != "nt":
-        return True
-    import ctypes
-    kernel32 = ctypes.windll.kernel32
-    mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
-    # ERROR_ALREADY_EXISTS = 183
-    return ctypes.GetLastError() != 183
-
-
-# --------- auto start (Windows registry) ---------
-def _set_auto_start(enabled: bool):
-    if os.name != "nt":
-        return
-    import winreg
-    exe_path = sys.executable if getattr(sys, "frozen", False) else str(Path(__file__).resolve())
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_KEY, 0, winreg.KEY_SET_VALUE)
-        if enabled:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
-        else:
-            try:
-                winreg.DeleteValue(key, APP_NAME)
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
-    except Exception:
-        pass
-
-
-# --------- system tray (pystray) ---------
-class TrayIcon:
-    def __init__(self, window):
-        self.window = window
-        self._icon = None
-
-    def start(self):
-        image = _load_icon_image()
-        menu = pystray.Menu(
-            pystray.MenuItem("显示主窗口", self._show_window, default=True),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出", self._quit),
-        )
-        self._icon = pystray.Icon(APP_NAME, image, APP_NAME, menu)
-        threading.Thread(target=self._icon.run, daemon=True).start()
-
-    def stop(self):
-        if self._icon:
-            try:
-                self._icon.stop()
-            except Exception:
-                pass
-
-    def _show_window(self, icon, item):
-        try:
-            self.window.restore()
-            self.window.show()
-        except Exception:
-            pass
-
-    def _quit(self, icon, item):
-        global _quitting
-        _quitting = True
-        SERVER.stop()
-        self.stop()
-        try:
-            self.window.destroy()
-        except Exception:
-            pass
 
 
 # --------- uvicorn server in thread ---------
@@ -146,17 +52,17 @@ class BridgeServer:
 SERVER = BridgeServer()
 _tray: TrayIcon | None = None
 _quitting = False
+_platform = get_platform()
 
 
 # --------- JS API exposed to frontend ---------
 class API:
-    # config CRUD
     def list_accounts(self):
-        cfg = config_store.load()
+        cfg = config.load()
         return cfg.get("accounts", [])
 
     def get_settings(self):
-        cfg = config_store.load()
+        cfg = config.load()
         return {
             "port": cfg.get("port"),
             "proxy_api_key": cfg.get("proxy_api_key"),
@@ -168,28 +74,26 @@ class API:
         }
 
     def update_settings(self, data):
-        old_cfg = config_store.load()
-        cfg = config_store.update_settings(data or {})
-        # 端口变化要重启
+        old_cfg = config.load()
+        cfg = config.update_settings(data or {})
         if SERVER.is_running() and SERVER.port != cfg.get("port"):
             SERVER.start(cfg.get("port", 4000))
-        # 开机自启变化要更新注册表
         new_auto = cfg.get("auto_start", False)
         if new_auto != old_cfg.get("auto_start", False):
-            _set_auto_start(new_auto)
+            _platform.set_auto_start(new_auto)
         return self.get_settings()
 
     def add_account(self, data):
-        return config_store.add_account(data or {})
+        return config.add_account(data or {})
 
     def update_account(self, account_id, data):
-        return config_store.update_account(account_id, data or {})
+        return config.update_account(account_id, data or {})
 
     def delete_account(self, account_id):
-        return config_store.delete_account(account_id)
+        return config.delete_account(account_id)
 
     def set_active(self, account_id):
-        return config_store.set_active(account_id)
+        return config.set_active(account_id)
 
     def list_providers(self):
         return providers.list_providers()
@@ -208,9 +112,8 @@ class API:
         except Exception as e:
             return {"error": str(e)}
 
-    # bridge control
     def get_status(self):
-        cfg = config_store.load()
+        cfg = config.load()
         port = cfg.get("port", 4000)
         return {
             "running": SERVER.is_running(),
@@ -220,7 +123,7 @@ class API:
         }
 
     def start_bridge(self):
-        cfg = config_store.load()
+        cfg = config.load()
         ok = SERVER.start(cfg.get("port", 4000))
         return {"ok": ok, **self.get_status()}
 
@@ -229,12 +132,11 @@ class API:
         return self.get_status()
 
     def restart_bridge(self):
-        cfg = config_store.load()
+        cfg = config.load()
         SERVER.start(cfg.get("port", 4000))
         return self.get_status()
 
     def quit_app(self):
-        """供前端/托盘调用，真正退出应用。"""
         global _quitting
         _quitting = True
         SERVER.stop()
@@ -246,26 +148,27 @@ class API:
             pass
 
 
-# hold reference to the window for tray access
 _window = None
+
+
+def _quit_from_tray():
+    global _quitting
+    _quitting = True
+    SERVER.stop()
 
 
 def main():
     global _tray, _window, _quitting
 
-    # 单实例检测：已有实例运行则直接退出
-    if not _check_single_instance():
+    if not _platform.check_single_instance():
         sys.exit(0)
 
-    # 自动启动 bridge
-    cfg = config_store.load()
+    cfg = config.load()
     SERVER.start(cfg.get("port", 4000))
-
-    # 同步开机自启注册表状态
-    _set_auto_start(cfg.get("auto_start", False))
+    _platform.set_auto_start(cfg.get("auto_start", False))
 
     api = API()
-    html_path = _resource_path("ui/index.html")
+    html_path = resource_path("ui/index.html")
 
     minimize_to_tray = cfg.get("minimize_to_tray", False)
     silent_start = cfg.get("silent_start", False)
@@ -286,7 +189,7 @@ def main():
     window.events.closed += on_closed
 
     if minimize_to_tray:
-        _tray = TrayIcon(window)
+        _tray = TrayIcon(window, on_quit=_quit_from_tray)
         _tray.start()
 
         def on_closing():
@@ -307,18 +210,3 @@ def main():
         threading.Thread(target=hide_on_start, daemon=True).start()
 
     webview.start(debug=False)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as e:
-        import traceback
-        print("=" * 60)
-        print("应用启动失败：", e)
-        print("=" * 60)
-        traceback.print_exc()
-        print("=" * 60)
-        input("按回车退出...")

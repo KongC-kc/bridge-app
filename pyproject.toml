@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-bridge"
+version = "0.5.0"
+description = "API 中转管理器 — 把任何 OpenAI-Compatible 模型转换成 OpenAI Responses API"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.6",
+    "uvicorn[standard]>=0.32.1",
+    "httpx>=0.27.2",
+    "pywebview>=5.3.2",
+    "pystray>=0.19; sys_platform == 'win32'",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.11.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ai_bridge = ["ui/**/*", "assets/**/*"]

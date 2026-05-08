@@ -2,12 +2,13 @@
 chcp 65001 >nul
 setlocal
 
+cd /d "%~dp0"
+
 echo ========================================
 echo  AI Bridge - Windows Build Script
 echo ========================================
 echo.
 
-REM 优先用 py launcher，其次 python
 where py >nul 2>nul
 if %errorlevel%==0 (
     set "PY=py -3"
@@ -15,20 +16,20 @@ if %errorlevel%==0 (
     set "PY=python"
 )
 
-echo [1/3] 安装依赖...
+echo [1/4] 安装依赖...
 %PY% -m pip install --upgrade pip
-%PY% -m pip install -r requirements.txt
+%PY% -m pip install -e ".[build]"
 if errorlevel 1 (
     echo [错误] 依赖安装失败
     pause
     exit /b 1
 )
 
-echo [2/3] 清理旧构建...
+echo [2/4] 清理旧构建...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
-echo [3/3] 打包 exe (PyInstaller)...
+echo [3/4] 打包 exe (PyInstaller)...
 %PY% -m PyInstaller AIBridge.spec --clean --noconfirm
 if errorlevel 1 (
     echo [错误] 打包失败

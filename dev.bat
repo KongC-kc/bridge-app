@@ -24,7 +24,7 @@ echo [1/2] 检查依赖...
 if errorlevel 1 (
     echo     缺少依赖，开始安装...
     %PY% -m pip install --upgrade pip
-    %PY% -m pip install -r requirements.txt
+    %PY% -m pip install -e .
     if errorlevel 1 (
         echo [错误] 依赖安装失败
         pause
@@ -40,7 +40,7 @@ echo （任何报错都会显示在下面，不会自动关闭窗口）
 echo ========================================
 echo.
 
-%PY% app.py
+%PY% -m ai_bridge
 
 echo.
 echo ========================================

@@ -24,8 +24,8 @@
 ```cmd
 git clone https://github.com/KongC-kc/bridge-app.git
 cd bridge-app
-pip install -r requirements.txt
-python app.py
+pip install -e .
+python -m ai_bridge
 ```
 
 > Win10 用户如弹窗报 WebView2 缺失，去 [Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) 装 x64 版。
@@ -33,7 +33,7 @@ python app.py
 ### 打包成 exe
 
 ```cmd
-pip install pyinstaller
+pip install -e ".[build]"
 pyinstaller AIBridge.spec
 ```
 
@@ -73,14 +73,23 @@ pyinstaller AIBridge.spec
 
 ```
 bridge-app/
-├── app.py              # 入口：PyWebView 窗口 + uvicorn 线程 + JS API
-├── bridge.py           # HTTP 服务：Responses ↔ Chat 双向转换
-├── config_store.py     # 配置存储 (%APPDATA%\AIBridge)
-├── providers.py        # 内置 Provider 预设
-├── ui/
-│   └── index.html      # 前端 UI（HTML + 内联 CSS/JS）
-├── requirements.txt
-├── AIBridge.spec       # PyInstaller 配置
+├── src/ai_bridge/
+│   ├── __main__.py         # 入口
+│   ├── app.py              # PyWebView 窗口 + uvicorn 线程 + JS API
+│   ├── bridge.py           # HTTP 服务：Responses ↔ Chat 双向转换
+│   ├── config.py           # 配置存储 (%APPDATA%\AIBridge)
+│   ├── providers.py        # 内置 Provider 预设
+│   ├── tray.py             # 系统托盘管理
+│   ├── _resources.py       # PyInstaller 资源路径
+│   ├── platform/           # 平台抽象层
+│   │   ├── base.py         # 接口定义
+│   │   └── windows.py      # Windows 实现（注册表自启、单实例锁）
+│   ├── ui/
+│   │   └── index.html      # 前端 UI（HTML + 内联 CSS/JS）
+│   └── assets/
+│       └── icon.ico
+├── pyproject.toml           # 项目配置 & 依赖
+├── AIBridge.spec            # PyInstaller 配置
 └── README.md
 ```
 
