@@ -11,6 +11,7 @@ from . import bridge, config, providers
 from ._resources import resource_path
 from .platform import get_platform
 from .tray import TrayIcon
+from . import quota
 
 APP_NAME = "AI Bridge"
 APP_TITLE = f"{APP_NAME} — API 中转管理"
@@ -121,6 +122,18 @@ class API:
             "url": f"http://127.0.0.1:{port}/v1",
             "proxy_api_key": cfg.get("proxy_api_key"),
         }
+
+    def check_quota(self, account_id=None):
+        cfg = config.load()
+        if account_id:
+            acc = next((a for a in cfg.get("accounts", []) if a["id"] == account_id), None)
+        else:
+            acc = config.get_active_account(cfg)
+        if not acc:
+            return {"ok": False, "error": "未找到账号"}
+        if not acc.get("api_key") or not acc.get("api_base"):
+            return {"ok": False, "error": "账号缺少 API Key 或 API Base"}
+        return quota.fetch_quota(acc["api_base"], acc["api_key"])
 
     def start_bridge(self):
         cfg = config.load()

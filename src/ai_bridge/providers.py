@@ -7,6 +7,13 @@ PROVIDERS = {
         "default_model": "glm-5.1",
         "doc_url": "https://open.bigmodel.cn",
     },
+    "glm_plan": {
+        "name": "GLM Plan",
+        "api_base": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "default_model": "glm-5.1",
+        "doc_url": "https://open.bigmodel.cn",
+        "has_quota": True,
+    },
     "deepseek": {
         "name": "DeepSeek",
         "api_base": "https://api.deepseek.com",

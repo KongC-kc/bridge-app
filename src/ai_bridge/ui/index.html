@@ -172,6 +172,40 @@
     border-radius: 999px; font-size: 10px; font-weight: 600;
     background: #eff6ff; color: #2563eb; margin-left: 6px;
   }
+  .quota-section {
+    margin-top: 4px;
+    padding: 10px 12px;
+    background: #f8fafc;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+  }
+  .quota-title {
+    font-size: 11px; font-weight: 600; color: #64748b;
+    margin-bottom: 8px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .quota-title .refresh-btn {
+    font-size: 11px; color: #2563eb; cursor: pointer;
+    background: none; border: none; padding: 0;
+  }
+  .quota-title .refresh-btn:hover { text-decoration: underline; }
+  .quota-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 6px; font-size: 11px; color: #475569;
+  }
+  .quota-row:last-child { margin-bottom: 0; }
+  .quota-row .label { width: 90px; flex-shrink: 0; }
+  .quota-bar {
+    flex: 1; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden;
+  }
+  .quota-bar .fill {
+    height: 100%; border-radius: 3px; transition: width 0.3s;
+  }
+  .quota-bar .fill.green { background: #22c55e; }
+  .quota-bar .fill.yellow { background: #eab308; }
+  .quota-bar .fill.red { background: #ef4444; }
+  .quota-row .pct { width: 44px; text-align: right; font-weight: 500; flex-shrink: 0; }
+  .quota-loading { font-size: 11px; color: #94a3b8; text-align: center; padding: 4px 0; }
 </style>
 </head>
 <body>
@@ -293,6 +327,7 @@ let settingsCache = null;
 let fetchedModels = [];       // models from upstream
 let selectedModels = [];      // user-selected models
 let editingModels = [];       // models saved in account being edited
+let quotaCache = {};          // accountId -> quota data
 
 function $(id) { return document.getElementById(id); }
 
@@ -342,6 +377,42 @@ function renderAccounts(accounts, status) {
   grid.innerHTML = accounts.map(acc => {
     const isActive = cfg.active_account_id === acc.id;
     const provName = (providers.find(p => p.key === acc.provider) || {}).name || acc.provider;
+    const provData = providers.find(p => p.key === acc.provider) || {};
+    const hasQuota = provData.has_quota;
+    const q = quotaCache[acc.id];
+    let quotaHtml = "";
+    if (hasQuota) {
+      if (q && q.ok) {
+        const bars = q.limits.map(l => {
+          const pct = Math.min(100, Math.max(0, l.percentage || 0));
+          const color = pct < 60 ? "green" : pct < 85 ? "yellow" : "red";
+          const remaining = l.remaining != null ? l.remaining : (100 - pct);
+          let detail = "";
+          if (l.currentUsage != null && l.total != null) {
+            detail = ` (${l.currentUsage}/${l.total})`;
+          }
+          return `<div class="quota-row">
+            <span class="label">${escapeHtml(l.type)}</span>
+            <div class="quota-bar"><div class="fill ${color}" style="width:${pct}%"></div></div>
+            <span class="pct">${remaining}%${detail ? `<span style="font-weight:400;font-size:10px;color:#94a3b8">${escapeHtml(detail)}</span>` : ""}</span>
+          </div>`;
+        }).join("");
+        quotaHtml = `<div class="quota-section">
+          <div class="quota-title"><span>套餐额度</span><button class="refresh-btn" onclick="fetchQuota('${acc.id}')">刷新</button></div>
+          ${bars || '<div class="quota-loading">暂无额度数据</div>'}
+        </div>`;
+      } else if (q && !q.ok) {
+        quotaHtml = `<div class="quota-section">
+          <div class="quota-title"><span>套餐额度</span><button class="refresh-btn" onclick="fetchQuota('${acc.id}')">重试</button></div>
+          <div class="quota-loading">${escapeHtml(q.error || "查询失败")}</div>
+        </div>`;
+      } else {
+        quotaHtml = `<div class="quota-section">
+          <div class="quota-title"><span>套餐额度</span><button class="refresh-btn" onclick="fetchQuota('${acc.id}')">查询</button></div>
+          <div class="quota-loading">点击查询额度</div>
+        </div>`;
+      }
+    }
     return `
       <div class="card ${isActive ? "active" : ""}">
         <div class="card-header">
@@ -356,6 +427,7 @@ function renderAccounts(accounts, status) {
         <div class="field"><span class="k">API Key</span><span class="v">${maskKey(acc.api_key)}</span></div>
         <div class="field"><span class="k">Base</span><span class="v">${escapeHtml(acc.api_base || "—")}</span></div>
         <div class="field"><span class="k">Model</span><span class="v">${escapeHtml(acc.default_model || "—")}${(acc.models && acc.models.length > 1) ? `<span class="model-count">+${acc.models.length - 1}</span>` : ""}</span></div>
+        ${quotaHtml}
         <div class="card-actions">
           ${isActive
             ? '<button class="btn sm" disabled>当前使用中</button>'
@@ -601,6 +673,29 @@ async function init() {
   await loadSettings();
   await refresh();
   setInterval(refresh, 5000);
+  setInterval(refreshAllQuota, 60000);
+}
+
+async function fetchQuota(accountId) {
+  quotaCache[accountId] = { ok: false, error: "查询中..." };
+  renderAccounts(await api("list_accounts"), null);
+  const result = await api("check_quota", accountId);
+  quotaCache[accountId] = result;
+  const accounts = await api("list_accounts");
+  const status = await api("get_status");
+  renderAccounts(accounts, status.running ? status : null);
+}
+
+async function refreshAllQuota() {
+  const accounts = await api("list_accounts");
+  for (const acc of accounts) {
+    const provData = providers.find(p => p.key === acc.provider) || {};
+    if (provData.has_quota && acc.enabled) {
+      try {
+        quotaCache[acc.id] = await api("check_quota", acc.id);
+      } catch (e) { /* skip */ }
+    }
+  }
 }
 
 window.addEventListener('pywebviewready', init);
