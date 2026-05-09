@@ -62,6 +62,7 @@ def fetch_quota(api_base: str, api_key: str) -> dict:
                                 "window": "5 小时滚动窗口",
                                 "percentage": pct,
                                 "remaining": round(100 - pct, 1),
+                                "nextResetTime": item.get("nextResetTime"),
                             })
                         elif ltype == "TIME_LIMIT":
                             limits.append({
@@ -72,6 +73,7 @@ def fetch_quota(api_base: str, api_key: str) -> dict:
                                 "currentUsage": item.get("currentValue", 0),
                                 "total": item.get("usage", 0),
                                 "usageDetails": item.get("usageDetails", []),
+                                "nextResetTime": item.get("nextResetTime"),
                             })
                         else:
                             limits.append({"type": ltype, "percentage": pct})
