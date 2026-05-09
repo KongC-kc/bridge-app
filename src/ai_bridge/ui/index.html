@@ -402,9 +402,11 @@ function renderAccounts(accounts, status) {
           ${bars || '<div class="quota-loading">暂无额度数据</div>'}
         </div>`;
       } else if (q && !q.ok) {
+        const debugDetail = q.debug ? `<details style="margin-top:4px;font-size:10px;color:#94a3b8;cursor:pointer;"><summary>调试信息</summary><span style="word-break:break-all;">${escapeHtml(q.debug)}</span></details>` : "";
         quotaHtml = `<div class="quota-section">
           <div class="quota-title"><span>套餐额度</span><button class="refresh-btn" onclick="fetchQuota('${acc.id}')">重试</button></div>
           <div class="quota-loading">${escapeHtml(q.error || "查询失败")}</div>
+          ${debugDetail}
         </div>`;
       } else {
         quotaHtml = `<div class="quota-section">
