@@ -13,10 +13,17 @@ def _base_domain(api_base: str) -> str:
     return f"{parsed.scheme}://{parsed.hostname}"
 
 
+def _auth_headers(api_key: str) -> dict:
+    key = api_key.strip()
+    if not key.startswith("Bearer "):
+        key = f"Bearer {key}"
+    return {"Authorization": key, "Content-Type": "application/json"}
+
+
 def fetch_quota(api_base: str, api_key: str) -> dict:
     """查询 GLM Plan 账号的额度信息，返回结构化结果。"""
     domain = _base_domain(api_base)
-    headers = {"Authorization": api_key, "Content-Type": "application/json"}
+    headers = _auth_headers(api_key)
 
     now = datetime.now()
     yesterday = now - timedelta(days=1)
@@ -57,8 +64,12 @@ def fetch_quota(api_base: str, api_key: str) -> dict:
                     else:
                         limits.append({"type": ltype, "percentage": pct})
                 result["limits"] = limits
+            else:
+                logger.warning("quota/limit HTTP %d: %s", r.status_code, r.text[:200])
+                result["debug"] = f"quota/limit 返回 HTTP {r.status_code}"
         except Exception as e:
             logger.warning("quota/limit query failed: %s", e)
+            result["debug"] = f"quota/limit 请求异常: {e}"
 
         # model-usage — 模型调用量
         try:
@@ -91,6 +102,6 @@ def fetch_quota(api_base: str, api_key: str) -> dict:
 
     if not result["limits"] and not result.get("error"):
         result["ok"] = False
-        result["error"] = "未获取到额度数据"
+        result["error"] = result.pop("debug", None) or "未获取到额度数据"
 
     return result
