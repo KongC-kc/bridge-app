@@ -51,7 +51,9 @@ def fetch_quota(api_base: str, api_key: str) -> dict:
                         continue
 
                     limits = []
-                    for item in data.get("limits") or []:
+                    # API 返回 {"code":200, "data":{"limits":[...]}}
+                    payload = data.get("data") or data
+                    for item in payload.get("limits") or []:
                         ltype = item.get("type", "")
                         pct = item.get("percentage", 0)
                         if ltype == "TOKENS_LIMIT":
