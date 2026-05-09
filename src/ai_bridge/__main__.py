@@ -3,7 +3,7 @@ import sys
 
 
 def _run():
-    from .app import main
+    from ai_bridge.app import main
     main()
 
 

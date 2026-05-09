@@ -31,6 +31,7 @@ a = Analysis(
         'ai_bridge.tray',
         'ai_bridge._resources',
         'ai_bridge.platform',
+        'ai_bridge.platform.base',
         'ai_bridge.platform.windows',
     ],
     hookspath=[],
