@@ -208,6 +208,20 @@
   .quota-loading { font-size: 11px; color: #94a3b8; text-align: center; padding: 4px 0; }
   .quota-reset { font-size: 10px; color: #94a3b8; margin-top: 6px; display: flex; align-items: center; gap: 4px; }
   .quota-reset .time { color: #475569; font-weight: 500; font-family: ui-monospace, Consolas, monospace; }
+  .test-result {
+    margin-top: 4px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    border: 1px solid;
+  }
+  .test-result.ok { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+  .test-result.partial { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+  .test-result.fail { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  .test-result.loading { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
+  .test-result .test-model-name { font-family: ui-monospace, Consolas, monospace; font-weight: 500; }
+  .test-result .test-latency { font-family: ui-monospace, Consolas, monospace; }
+  .test-result .test-error { margin-top: 4px; word-break: break-all; opacity: 0.85; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -330,6 +344,7 @@ let fetchedModels = [];       // models from upstream
 let selectedModels = [];      // user-selected models
 let editingModels = [];       // models saved in account being edited
 let quotaCache = {};          // accountId -> quota data
+let testCache = {};           // accountId -> test result
 
 function $(id) { return document.getElementById(id); }
 
@@ -382,6 +397,7 @@ function renderAccounts(accounts, status) {
     const provData = providers.find(p => p.key === acc.provider) || {};
     const hasQuota = provData.has_quota;
     const q = quotaCache[acc.id];
+    const t = testCache[acc.id];
     let quotaHtml = "";
     if (hasQuota) {
       if (q && q.ok) {
@@ -436,11 +452,20 @@ function renderAccounts(accounts, status) {
         <div class="field"><span class="k">Base</span><span class="v">${escapeHtml(acc.api_base || "—")}</span></div>
         <div class="field"><span class="k">Model</span><span class="v">${escapeHtml(acc.default_model || "—")}${(acc.models && acc.models.length > 1) ? `<span class="model-count">+${acc.models.length - 1}</span>` : ""}</span></div>
         ${quotaHtml}
+        ${t ? (t._loading
+          ? `<div class="test-result loading">测试中...</div>`
+          : t.ok
+            ? `<div class="test-result ok"><span class="test-model-name">${escapeHtml(t.model)}</span> 连通正常 · <span class="test-latency">${t.latency_ms}ms</span></div>`
+            : t.partial
+              ? `<div class="test-result partial"><span class="test-model-name">${escapeHtml(t.model || acc.default_model || "?")}</span> 部分连通<div class="test-error">${escapeHtml(t.error)}</div></div>`
+              : `<div class="test-result fail"><span class="test-model-name">${escapeHtml(acc.default_model || "?")}</span> 连接失败<div class="test-error">${escapeHtml(t.error)}</div></div>`)
+          : ""}
         <div class="card-actions">
           ${isActive
             ? '<button class="btn sm" disabled>当前使用中</button>'
             : `<button class="btn sm primary" onclick="setActive('${acc.id}')">设为当前</button>`}
           <button class="btn sm" onclick="editAccount('${acc.id}')">编辑</button>
+          ${acc.enabled && acc.default_model ? `<button class="btn sm" onclick="testModel('${acc.id}')">测试模型</button>` : ""}
           <button class="btn sm" onclick="toggleEnabled('${acc.id}', ${!acc.enabled})">${acc.enabled ? "停用" : "启用"}</button>
         </div>
       </div>
@@ -709,6 +734,16 @@ async function fetchQuota(accountId) {
   renderAccounts(await api("list_accounts"), null);
   const result = await api("check_quota", accountId);
   quotaCache[accountId] = result;
+  const accounts = await api("list_accounts");
+  const status = await api("get_status");
+  renderAccounts(accounts, status.running ? status : null);
+}
+
+async function testModel(accountId) {
+  testCache[accountId] = { _loading: true };
+  renderAccounts(await api("list_accounts"), null);
+  const result = await api("test_model", accountId);
+  testCache[accountId] = result;
   const accounts = await api("list_accounts");
   const status = await api("get_status");
   renderAccounts(accounts, status.running ? status : null);

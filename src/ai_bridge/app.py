@@ -113,6 +113,75 @@ class API:
         except Exception as e:
             return {"error": str(e)}
 
+    def test_model(self, account_id, model=None):
+        cfg = config.load()
+        acc = next((a for a in cfg.get("accounts", []) if a["id"] == account_id), None)
+        if not acc:
+            return {"ok": False, "error": "未找到账号"}
+        if not acc.get("api_key") or not acc.get("api_base"):
+            return {"ok": False, "error": "账号缺少 API Key 或 API Base"}
+        model = model or acc.get("default_model")
+        if not model:
+            return {"ok": False, "error": "未指定模型"}
+        base = acc["api_base"].rstrip("/")
+        headers = {"Authorization": f"Bearer {acc['api_key']}", "Content-Type": "application/json"}
+
+        # Step 1: check /models to verify API key & model existence
+        models_ok = False
+        model_found = False
+        models_latency = 0
+        try:
+            start = time.monotonic()
+            r = httpx.get(f"{base}/models", headers=headers, timeout=15.0)
+            models_latency = round((time.monotonic() - start) * 1000)
+            if r.status_code == 200:
+                models_ok = True
+                model_ids = [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
+                model_found = model in model_ids
+            else:
+                return {"ok": False, "error": f"模型列表请求失败 (HTTP {r.status_code})",
+                        "latency_ms": models_latency}
+        except httpx.TimeoutException:
+            return {"ok": False, "error": "模型列表请求超时 (15s)"}
+        except Exception as e:
+            return {"ok": False, "error": f"模型列表请求异常: {e}"}
+
+        if not model_found:
+            return {"ok": False, "partial": True,
+                    "error": f"API Key 有效但模型列表中未找到 {model}",
+                    "latency_ms": models_latency, "model": model}
+
+        # Step 2: try chat/completions to verify model actually responds
+        try:
+            body = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+            start = time.monotonic()
+            r = httpx.post(f"{base}/chat/completions", json=body, headers=headers, timeout=15.0)
+            latency = round((time.monotonic() - start) * 1000)
+            if r.status_code == 200:
+                return {"ok": True, "latency_ms": latency, "model": model}
+            # chat failed but models ok -> partial
+            msg = r.text[:300]
+            try:
+                data = r.json()
+                err = data.get("error") or data.get("msg") or data.get("message") or ""
+                if isinstance(err, dict):
+                    msg = err.get("message") or err.get("msg") or str(err)
+                elif isinstance(err, str) and err:
+                    msg = err
+            except Exception:
+                pass
+            return {"ok": False, "partial": True,
+                    "error": f"模型存在但推理请求失败: HTTP {r.status_code} {msg[:150]}",
+                    "latency_ms": latency, "model": model}
+        except httpx.TimeoutException:
+            return {"ok": False, "partial": True,
+                    "error": "模型存在但推理请求超时",
+                    "latency_ms": models_latency, "model": model}
+        except Exception as e:
+            return {"ok": False, "partial": True,
+                    "error": f"模型存在但推理请求异常: {e}",
+                    "latency_ms": models_latency, "model": model}
+
     def get_status(self):
         cfg = config.load()
         port = cfg.get("port", 4000)
