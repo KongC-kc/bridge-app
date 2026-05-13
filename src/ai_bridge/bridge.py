@@ -13,6 +13,11 @@ from . import config
 
 logger = logging.getLogger("bridge")
 
+# GLM 等模型的典型上下文窗口，用于粗略截断保护
+DEFAULT_CONTEXT_WINDOW = 258400
+# 每条 message 大约的 token 数估算倍率（字符 → token）
+CHARS_PER_TOKEN = 3.5
+
 app = FastAPI(title="AI Bridge")
 
 
@@ -168,6 +173,77 @@ def responses_to_chat(body: dict, model: str) -> dict:
     return chat
 
 
+def _error_responses_resp(model: str, req_body: dict | None,
+                         status_code: int, message: str) -> JSONResponse:
+    """将上游错误包装为 Responses API 格式返回给 Codex 等客户端。"""
+    resp = {
+        "id": _new_id("resp"),
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "failed",
+        "output": [],
+        "output_text": "",
+        "error": {"message": message},
+        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+    }
+    resp.update(_resp_base(req_body, model))
+    return JSONResponse(status_code=status_code, content=resp)
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """粗略估算 messages 的 token 数（字符数 / CHARS_PER_TOKEN）。"""
+    total_chars = 0
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, str):
+            total_chars += len(c)
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict):
+                    total_chars += len(str(part))
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            total_chars += len(fn.get("arguments", ""))
+    return int(total_chars / CHARS_PER_TOKEN)
+
+
+def _truncate_messages(messages: list[dict], max_tokens: int) -> list[dict]:
+    """当 messages 估算 token 超过 max_tokens 时，截断早期对话轮次。
+
+    保留策略：system 消息 + 最后 N 轮对话（assistant+tool+user）。
+    """
+    est = _estimate_tokens(messages)
+    if est <= max_tokens:
+        return messages
+
+    logger.warning("Estimated tokens %d > max %d, truncating conversation", est, max_tokens)
+
+    # 找到第一个非 system 消息的索引
+    first_non_system = 0
+    for i, m in enumerate(messages):
+        if m.get("role") != "system":
+            first_non_system = i
+            break
+
+    system_msgs = messages[:first_non_system]
+    convo = messages[first_non_system:]
+
+    # 从头部逐步删除对话轮次，直到 token 数达标
+    # 一个"轮次"从一个 user 或 assistant 消息开始
+    while convo and _estimate_tokens(system_msgs + convo) > max_tokens:
+        # 找到下一个轮次边界（下一个 role=assistant 或 role=user 的消息）
+        removed = 0
+        for i in range(1, len(convo)):
+            if convo[i].get("role") in ("user", "assistant"):
+                removed = i
+                break
+        else:
+            removed = len(convo)
+        convo = convo[removed:]
+
+    return system_msgs + convo
+
+
 def _resp_base(req_body: dict | None, model: str) -> dict:
     b = req_body or {}
     return {
@@ -279,10 +355,19 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
                               json=chat_body, headers=headers) as r:
             if r.status_code != 200:
                 err_text = await r.aread()
+                err_msg = err_text.decode("utf-8", "ignore")
+                logger.error("Upstream non-200 in stream: %s %s", r.status_code, err_msg[:500])
+                failed_resp = {**base_resp, "status": "failed"}
                 yield _sse("response.failed", {
                     "type": "response.failed",
-                    "response": {**base_resp, "status": "failed"},
-                    "error": {"message": err_text.decode("utf-8", "ignore")},
+                    "response": failed_resp,
+                    "error": {"message": err_msg},
+                })
+                yield _sse("response.completed", {
+                    "type": "response.completed",
+                    "response": {**failed_resp, "output": [],
+                                 "output_text": "",
+                                 "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}},
                 })
                 return
 
@@ -414,6 +499,10 @@ async def stream_responses(chat_body: dict, model: str, api_base: str, api_key: 
     finally:
         await cli.aclose()
 
+    # 当 stream 没有产生任何内容时，记录日志以便排查
+    if not final_output and not full_text and not tool_calls and not upstream_errored:
+        logger.warning("Stream completed with empty output for model=%s", model)
+
     if text_msg_id is not None:
         if text_part_added:
             yield _sse("response.output_text.done", {
@@ -479,7 +568,23 @@ async def responses_endpoint(request: Request, authorization: str = Header(None)
     acc = _resolve_account()
     body = await request.json()
     model = _resolve_model(acc, body.get("model"))
+    stream = body.get("stream", False)
+
+    logger.info("Responses request: model=%s stream=%s tools=%d input_items=%d",
+                model, stream,
+                len(body.get("tools") or []),
+                len(body.get("input") or []) if isinstance(body.get("input"), list) else 1)
+
     chat_body = responses_to_chat(body, model)
+
+    # 上下文截断保护
+    max_ctx = DEFAULT_CONTEXT_WINDOW
+    msg_count_before = len(chat_body["messages"])
+    chat_body["messages"] = _truncate_messages(chat_body["messages"], max_ctx)
+    msg_count_after = len(chat_body["messages"])
+    if msg_count_before != msg_count_after:
+        logger.warning("Truncated messages: %d -> %d (est tokens > %d)",
+                       msg_count_before, msg_count_after, max_ctx)
 
     if body.get("stream"):
         return StreamingResponse(
@@ -489,12 +594,31 @@ async def responses_endpoint(request: Request, authorization: str = Header(None)
         )
 
     headers = {"Authorization": f"Bearer {acc['api_key']}", "Content-Type": "application/json"}
-    async with _make_client() as cli:
-        r = await cli.post(f"{acc['api_base'].rstrip('/')}/chat/completions",
-                           json=chat_body, headers=headers)
+    try:
+        async with _make_client() as cli:
+            r = await cli.post(f"{acc['api_base'].rstrip('/')}/chat/completions",
+                               json=chat_body, headers=headers)
+    except (httpx.ReadTimeout, httpx.ConnectError, httpx.PoolTimeout) as exc:
+        logger.error("Upstream connection error: %s", exc)
+        return _error_responses_resp(model, body, 502, f"Upstream timeout: {exc}")
+
     if r.status_code != 200:
-        return JSONResponse(status_code=r.status_code, content=_safe_json(r))
-    return chat_to_responses(r.json(), model, req_body=body)
+        err = _safe_json(r)
+        err_msg = "Upstream API error"
+        if isinstance(err, dict):
+            e = err.get("error") or err.get("message") or ""
+            err_msg = e if isinstance(e, str) else json.dumps(e, ensure_ascii=False)
+        err_msg = f"HTTP {r.status_code}: {err_msg[:500]}"
+        logger.error("Upstream error: %s", err_msg)
+        return _error_responses_resp(model, body, r.status_code, err_msg)
+
+    try:
+        result = chat_to_responses(r.json(), model, req_body=body)
+    except Exception as exc:
+        logger.error("Response conversion error: %s", exc)
+        return _error_responses_resp(model, body, 502, f"Response conversion failed: {exc}")
+
+    return result
 
 
 @app.post("/v1/chat/completions")
