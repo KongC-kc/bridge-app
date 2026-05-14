@@ -70,6 +70,18 @@ PROVIDERS = {
             "simplify_schema": True,
         },
     },
+    "mimo": {
+        "name": "小米 MiMo",
+        "api_base": "https://api.xiaomimimo.com/v1",
+        "default_model": "mimo-v2.5-pro",
+        "doc_url": "https://platform.xiaomimimo.com",
+        "capabilities": {
+            "parallel_tool_calls": False,
+            "strict_tool_definition": False,
+            "tool_choice_values": ["auto", "none"],
+            "simplify_schema": True,
+        },
+    },
     "openai": {
         "name": "OpenAI",
         "api_base": "https://api.openai.com/v1",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-bridge"
-version = "0.8.0"
+version = "0.8.1"
 description = "API 中转管理器 — 把任何 OpenAI-Compatible 模型转换成 OpenAI Responses API"
 readme = "README.md"
 license = "MIT"
