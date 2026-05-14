@@ -10,6 +10,7 @@ from ai_bridge.bridge import (
     _error_responses_resp,
     _estimate_tokens,
     _resp_base,
+    _simplify_schema,
     _truncate_messages,
     chat_to_responses,
     responses_to_chat,
@@ -504,3 +505,332 @@ class TestStreaming:
         fc_items = [o for o in completed["response"]["output"] if o["type"] == "function_call"]
         assert len(fc_items) == 1
         assert fc_items[0]["name"] == "shell"
+
+
+# ====================================================================
+# E. Unit tests — Schema simplification
+# ====================================================================
+
+class TestSimplifySchema:
+    def test_simple_schema_unchanged(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "File name"},
+                "lines": {"type": "integer"},
+            },
+            "required": ["name"],
+        }
+        result = _simplify_schema(schema)
+        assert result == schema
+
+    def test_ref_inline_from_defs(self):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "FileInfo": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "size": {"type": "integer"},
+                    },
+                },
+            },
+            "properties": {
+                "files": {"type": "array", "items": {"$ref": "#/$defs/FileInfo"}},
+            },
+        }
+        result = _simplify_schema(schema)
+        # $ref should be resolved, $defs should be removed
+        assert "$defs" not in result
+        assert "$ref" not in result["properties"]["files"]["items"]
+        items = result["properties"]["files"]["items"]
+        assert items["type"] == "object"
+        assert "path" in items["properties"]
+
+    def test_anyof_flatten_to_first_non_null(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "null"},
+                    ],
+                    "description": "File content",
+                },
+            },
+        }
+        result = _simplify_schema(schema)
+        prop = result["properties"]["content"]
+        assert "anyOf" not in prop
+        assert prop["type"] == "string"
+        assert prop["description"] == "File content"
+
+    def test_oneof_flatten(self):
+        schema = {
+            "properties": {
+                "val": {
+                    "oneOf": [
+                        {"type": "integer"},
+                        {"type": "string"},
+                    ],
+                },
+            },
+        }
+        result = _simplify_schema(schema)
+        assert result["properties"]["val"]["type"] == "integer"
+
+    def test_allof_merge(self):
+        schema = {
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+                {
+                    "type": "object",
+                    "properties": {"age": {"type": "integer"}},
+                    "required": ["age"],
+                },
+            ],
+        }
+        result = _simplify_schema(schema)
+        assert "allOf" not in result
+        assert "name" in result["properties"]
+        assert "age" in result["properties"]
+        assert "name" in result["required"]
+        assert "age" in result["required"]
+
+    def test_removes_unsupported_keys(self):
+        schema = {
+            "type": "object",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "$comment": "a comment",
+            "properties": {
+                "x": {"type": "string"},
+            },
+            "if": {"properties": {"x": {"const": "a"}}},
+            "then": {"properties": {"y": {"type": "string"}}},
+        }
+        result = _simplify_schema(schema)
+        assert "$schema" not in result
+        assert "$comment" not in result
+        assert "if" not in result
+        assert "then" not in result
+        assert result["properties"]["x"]["type"] == "string"
+
+    def test_nested_ref_and_anyof(self):
+        """MCP-style schema with $ref inside anyOf."""
+        schema = {
+            "type": "object",
+            "$defs": {
+                "TextContent": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["text"]},
+                        "text": {"type": "string"},
+                    },
+                },
+            },
+            "properties": {
+                "content": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/TextContent"},
+                        {"type": "null"},
+                    ],
+                },
+            },
+        }
+        result = _simplify_schema(schema)
+        content = result["properties"]["content"]
+        assert "anyOf" not in content
+        assert content["type"] == "object"
+        assert "text" in content["properties"]
+
+    def test_empty_schema(self):
+        assert _simplify_schema({}) == {}
+
+    def test_non_dict_passthrough(self):
+        assert _simplify_schema("hello") == "hello"
+        assert _simplify_schema(42) == 42
+        assert _simplify_schema([{"type": "string"}]) == [{"type": "string"}]
+
+
+# ====================================================================
+# F. Unit tests — Provider capabilities in responses_to_chat
+# ====================================================================
+
+class TestProviderCapabilities:
+    def _mcp_tool(self):
+        """A typical MCP tool with complex schema."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "$defs": {
+                        "LineRange": {
+                            "type": "object",
+                            "properties": {
+                                "start": {"type": "integer"},
+                                "end": {"type": "integer"},
+                            },
+                        },
+                    },
+                    "properties": {
+                        "path": {"type": "string", "description": "File path"},
+                        "range": {
+                            "anyOf": [
+                                {"$ref": "#/$defs/LineRange"},
+                                {"type": "null"},
+                            ],
+                            "description": "Line range",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+        }
+
+    def test_glm_capabilities_simplify_and_strip(self):
+        caps = {
+            "simplify_schema": True,
+            "strict_tool_definition": False,
+            "parallel_tool_calls": False,
+            "tool_choice_values": ["auto", "none"],
+        }
+        body = {
+            "input": "Read foo.py",
+            "tools": [self._mcp_tool()],
+            "tool_choice": {"type": "required"},
+            "parallel_tool_calls": True,
+        }
+        chat = responses_to_chat(body, "m", capabilities=caps)
+
+        # Schema should be simplified — no $defs, no $ref, no anyOf
+        params = chat["tools"][0]["function"]["parameters"]
+        assert "$defs" not in params
+        assert "$ref" not in str(params)
+        assert "anyOf" not in str(params)
+
+        # strict should be removed
+        assert "strict" not in chat["tools"][0]["function"]
+
+        # parallel_tool_calls should be removed
+        assert "parallel_tool_calls" not in chat
+
+        # tool_choice "required" → "auto"
+        assert chat["tool_choice"] == "auto"
+
+    def test_deepseek_capabilities_add_strict(self):
+        caps = {
+            "simplify_schema": True,
+            "strict_tool_definition": True,
+            "parallel_tool_calls": False,
+            "tool_choice_values": ["auto", "required", "none"],
+        }
+        body = {
+            "input": "Read",
+            "tools": [self._mcp_tool()],
+            "tool_choice": {"type": "required"},
+        }
+        chat = responses_to_chat(body, "m", capabilities=caps)
+
+        # strict should be True
+        assert chat["tools"][0]["function"]["strict"] is True
+
+        # tool_choice "required" should be kept as-is (it's converted to string "required")
+        assert chat["tool_choice"] == "required"
+
+    def test_openai_no_simplification(self):
+        caps = {
+            "simplify_schema": False,
+            "strict_tool_definition": True,
+            "parallel_tool_calls": True,
+            "tool_choice_values": ["auto", "required", "none"],
+        }
+        body = {
+            "input": "Read",
+            "tools": [self._mcp_tool()],
+            "parallel_tool_calls": True,
+        }
+        chat = responses_to_chat(body, "m", capabilities=caps)
+
+        # Schema should NOT be simplified
+        params = chat["tools"][0]["function"]["parameters"]
+        assert "$defs" in params
+
+        # parallel_tool_calls should be kept
+        assert chat["parallel_tool_calls"] is True
+
+    def test_no_capabilities_backward_compatible(self):
+        """Without capabilities param, behavior matches old code."""
+        body = {
+            "input": "Hi",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "test",
+                    "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+                },
+            }],
+        }
+        chat = responses_to_chat(body, "m")
+        assert chat["tools"][0]["function"]["name"] == "test"
+        assert "strict" not in chat["tools"][0]["function"]
+
+
+# ====================================================================
+# G. Integration test — MCP-style tool request through endpoint
+# ====================================================================
+
+class TestMCPToolEndpoint:
+    def test_mcp_tools_simplified_for_glm(self, client, auth_headers):
+        """MCP tools with complex schemas should be simplified before upstream."""
+        mcp_tool = {
+            "type": "function",
+            "function": {
+                "name": "execute_command",
+                "description": "Run a shell command",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {"CommandOpts": {"type": "object", "properties": {"timeout": {"type": "integer"}}}},
+                    "properties": {
+                        "command": {"type": "string"},
+                        "options": {"anyOf": [{"$ref": "#/$defs/CommandOpts"}, {"type": "null"}]},
+                    },
+                    "required": ["command"],
+                },
+            },
+        }
+
+        captured = {}
+
+        def capture_post(url, json=None, **kwargs):
+            captured["tools"] = json.get("tools", [])
+            r = MagicMock()
+            r.status_code = 200
+            r.json.return_value = _upstream_response(content="done")
+            return r
+
+        mock_cli = AsyncMock()
+        mock_cli.__aenter__.return_value = mock_cli
+        mock_cli.post = AsyncMock(side_effect=capture_post)
+        mock_cli.aclose = AsyncMock()
+
+        with patch("ai_bridge.bridge._make_client", return_value=mock_cli):
+            resp = client.post("/v1/responses",
+                               json={"input": "Run ls", "stream": False, "tools": [mcp_tool]},
+                               headers=auth_headers)
+
+        assert resp.status_code == 200
+        # Verify schema was simplified
+        params = captured["tools"][0]["function"]["parameters"]
+        assert "$defs" not in params
+        assert "anyOf" not in str(params)
+        assert "parallel_tool_calls" not in captured  # GLM shouldn't have it

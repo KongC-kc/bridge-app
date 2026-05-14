@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config
+from .providers import get_capabilities
 
 logger = logging.getLogger("bridge")
 
@@ -17,6 +18,118 @@ logger = logging.getLogger("bridge")
 DEFAULT_CONTEXT_WINDOW = 258400
 # 每条 message 大约的 token 数估算倍率（字符 → token）
 CHARS_PER_TOKEN = 3.5
+
+# 需要从 JSON Schema 中移除的关键字（国产模型大多不支持）
+_UNSUPPORTED_SCHEMA_KEYS = frozenset({
+    "$defs", "$ref", "$schema", "$comment",
+    "if", "then", "else", "not",
+    "patternProperties", "dependentSchemas", "prefixItems",
+    "contentMediaType", "contentEncoding",
+})
+
+
+def _simplify_schema(schema: dict | list | Any, _defs: dict | None = None) -> dict | list | Any:
+    """递归简化 JSON Schema，使国产模型兼容。
+
+    - 内联展开 $ref（从 $defs 中查找）
+    - 扁平化 anyOf/oneOf（取第一个非 null 类型）
+    - 合并 allOf（将多个对象的 properties 合并）
+    - 移除不支持的关键字
+    """
+    if not isinstance(schema, dict):
+        if isinstance(schema, list):
+            return [_simplify_schema(item, _defs) for item in schema]
+        return schema
+
+    # 顶层提取 $defs 供 $ref 查找
+    defs = _defs or {}
+    if "$defs" in schema:
+        defs = {**defs, **schema["$defs"]}
+
+    # 解析 $ref
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if ref.startswith("#/$defs/") and ref[8:] in defs:
+            resolved = defs[ref[8:]]
+            # 用解析后的内容替换，保留额外的 description 等字段
+            merged = {**_simplify_schema(resolved, defs)}
+            for k, v in schema.items():
+                if k not in ("$ref",) and k not in merged:
+                    merged[k] = v
+            return merged
+        # 无法解析的 $ref，移除
+        return {"type": "string"}
+
+    result: dict[str, Any] = {}
+
+    # 处理 allOf：合并所有子 schema 的 properties
+    if "allOf" in schema:
+        merged_props: dict[str, Any] = {}
+        merged_required: list[str] = []
+        base: dict[str, Any] = {}
+        for sub in schema["allOf"]:
+            simplified_sub = _simplify_schema(sub, defs)
+            if isinstance(simplified_sub, dict):
+                for k, v in simplified_sub.items():
+                    if k == "properties":
+                        merged_props.update(v)
+                    elif k == "required":
+                        merged_required.extend(v)
+                    else:
+                        base[k] = v
+        base["properties"] = merged_props
+        if merged_required:
+            base["required"] = merged_required
+        # 合并原始 schema 中除 allOf 外的字段
+        for k, v in schema.items():
+            if k == "allOf":
+                continue
+            if k == "properties" and "properties" in base:
+                base["properties"].update(v)
+            elif k == "required" and "required" in base:
+                base["required"] = list(set(base["required"]) | set(v))
+            else:
+                base[k] = v
+        return _simplify_schema(base, defs)
+
+    # 处理 anyOf / oneOf：取第一个非 null 类型
+    if "anyOf" in schema or "oneOf" in schema:
+        alternatives = schema.get("anyOf") or schema.get("oneOf") or []
+        non_null = []
+        for alt in alternatives:
+            s = _simplify_schema(alt, defs)
+            if isinstance(s, dict) and s.get("type") != "null":
+                non_null.append(s)
+        if non_null:
+            chosen = non_null[0]
+            # 保留原始 schema 中的 description 等字段
+            for k, v in schema.items():
+                if k not in ("anyOf", "oneOf") and k not in chosen:
+                    chosen[k] = v
+            return chosen
+        # 全部是 null，回退到 string
+        return {"type": "string"}
+
+    # 递归处理 properties
+    if "properties" in schema:
+        result["properties"] = {
+            k: _simplify_schema(v, defs) for k, v in schema["properties"].items()
+        }
+    if "items" in schema:
+        result["items"] = _simplify_schema(schema["items"], defs)
+    if "additionalProperties" in schema and isinstance(schema["additionalProperties"], dict):
+        result["additionalProperties"] = _simplify_schema(schema["additionalProperties"], defs)
+
+    # 复制支持的字段，跳过不支持的
+    for k, v in schema.items():
+        if k in ("properties", "items", "additionalProperties"):
+            continue  # 已处理
+        if k in _UNSUPPORTED_SCHEMA_KEYS:
+            continue
+        result[k] = v
+
+    return result
+
 
 app = FastAPI(title="AI Bridge")
 
@@ -65,7 +178,8 @@ def _sse(event: str, data: dict) -> bytes:
 
 
 # ---------- request: Responses -> Chat ----------
-def responses_to_chat(body: dict, model: str) -> dict:
+def responses_to_chat(body: dict, model: str,
+                      capabilities: dict | None = None) -> dict:
     chat: dict[str, Any] = {"model": model, "stream": body.get("stream", False)}
     messages: list[dict] = []
     if body.get("instructions"):
@@ -129,6 +243,10 @@ def responses_to_chat(body: dict, model: str) -> dict:
 
     chat["messages"] = messages
 
+    caps = capabilities or {}
+    simplify = caps.get("simplify_schema", False)
+    want_strict = caps.get("strict_tool_definition", False)
+
     if body.get("tools"):
         chat_tools = []
         for tool in body["tools"]:
@@ -136,17 +254,23 @@ def responses_to_chat(body: dict, model: str) -> dict:
                 continue
             if "function" in tool:
                 fn = dict(tool["function"])
-                fn.pop("strict", None)
-                chat_tools.append({"type": "function", "function": fn})
+                if not want_strict:
+                    fn.pop("strict", None)
             else:
-                chat_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.get("name"),
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters", {}),
-                    },
-                })
+                fn = {
+                    "name": tool.get("name"),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters", {}),
+                }
+
+            # 简化工具参数 schema
+            if simplify and fn.get("parameters"):
+                fn["parameters"] = _simplify_schema(fn["parameters"])
+
+            if want_strict:
+                fn["strict"] = True
+
+            chat_tools.append({"type": "function", "function": fn})
         if chat_tools:
             chat["tools"] = chat_tools
 
@@ -163,8 +287,18 @@ def responses_to_chat(body: dict, model: str) -> dict:
                     val = tc_type
             chat[k] = val
 
+    # 根据 capabilities 过滤 tool_choice
+    allowed_tc = caps.get("tool_choice_values")
+    if allowed_tc and chat.get("tool_choice") and chat["tool_choice"] not in allowed_tc:
+        chat["tool_choice"] = "auto"
+
     if body.get("parallel_tool_calls") is True:
         chat["parallel_tool_calls"] = True
+
+    # 根据 capabilities 过滤 parallel_tool_calls
+    if not caps.get("parallel_tool_calls", True):
+        chat.pop("parallel_tool_calls", None)
+
     if "max_output_tokens" in body:
         chat["max_tokens"] = body["max_output_tokens"]
     elif "max_tokens" in body:
@@ -575,7 +709,8 @@ async def responses_endpoint(request: Request, authorization: str = Header(None)
                 len(body.get("tools") or []),
                 len(body.get("input") or []) if isinstance(body.get("input"), list) else 1)
 
-    chat_body = responses_to_chat(body, model)
+    capabilities = get_capabilities(acc.get("provider"))
+    chat_body = responses_to_chat(body, model, capabilities=capabilities)
 
     # 上下文截断保护
     max_ctx = DEFAULT_CONTEXT_WINDOW
